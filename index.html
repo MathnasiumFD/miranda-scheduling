@@ -8670,9 +8670,15 @@ function jumpToDate(dateStr){
 // it, so "which Pod is this, who's covering it, how full is it" always reads identically wherever
 // a Pod gets picked. No option is ever disabled here (Sept 2026 — pick freely, no age or capacity
 // blocking on the picker itself); capacity is still enforced when the pick is actually confirmed.
+// Names whoever is ACTUALLY minding the Pod that day (Nov 2026, per Allie: "when I change an
+// instructor in the whos here right now table, I need those changes to come up in the dropdown list
+// when checking-in a student") — a floor move from the board wins over the roster, via
+// sessionMinderFor(), the same rule that decides which instructor the session itself gets.
 function podOptionLabel(pod, weekday, dateKey, start, duration){
-  const cov=podCoverageDetail(pod.id, weekday, start, duration, new Date(dateKey));
-  const who=cov.primaryInstructorId? findInstructor(cov.primaryInstructorId).name : 'Unassigned';
+  const date=new Date(dateKey);
+  const fl=floorAssignmentFor(pod.id, dateKey);
+  const cov=sessionMinderFor(pod.id, weekday, start, duration, date);
+  const who=cov.primaryInstructorId? findInstructor(cov.primaryInstructorId).name : (fl? 'No instructor' : 'Unassigned');
   const peak=peakConcurrency(pod.id, dateKey, {start, duration});
   const cap=podCapacity(pod.id);
   return pod.name+' — '+who+' — '+peak+'/'+cap;
