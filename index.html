@@ -182,6 +182,27 @@
   .banner.accent{ background:var(--accent-bg); color:var(--accent); }
   .banner.parent-announcement{ font-size:.95rem; display:block; padding:12px 14px; background:var(--danger-bg); color:var(--danger); border:1px solid var(--danger); }
   .banner.parent-announcement a{ color:inherit; font-weight:700; }
+  /* Bigger and more fun, and it stays on screen while the parent scrolls (Nov 2026, per Allie). */
+  .banner.parent-announcement{ display:flex; align-items:center; gap:16px; flex-wrap:wrap; padding:16px 22px; margin-bottom:16px; border-radius:16px;
+    background:linear-gradient(135deg, var(--danger-bg) 0%, var(--warning-bg) 100%); border:2px solid var(--danger); box-shadow:0 4px 14px rgba(0,0,0,.12);
+    position:sticky; top:8px; z-index:50; }
+  .pa-emoji{ font-size:2.6rem; line-height:1; display:inline-block; animation:pa-spin 12s linear infinite; }
+  @keyframes pa-spin{ to{ transform:rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce){ .pa-emoji{ animation:none; } }
+  .pa-text{ flex:1 1 220px; }
+  .pa-title{ font-size:1.35rem; font-weight:800; line-height:1.25; }
+  .pa-sub{ font-size:.9rem; margin-top:4px; }
+  .banner.parent-announcement a.pa-btn{ display:inline-block; background:var(--danger); color:#fff; font-weight:800; font-size:1rem; padding:10px 20px; border-radius:999px; text-decoration:none; white-space:nowrap; box-shadow:0 2px 6px rgba(0,0,0,.15); transition:transform .15s; }
+  .banner.parent-announcement a.pa-btn:hover{ transform:scale(1.05); }
+  /* On a phone it stays on screen too, so keep it compact there: one tidy line plus the button. */
+  @media (max-width:600px){
+    .banner.parent-announcement{ padding:10px 12px; gap:10px; flex-wrap:nowrap; }
+    .pa-emoji{ font-size:1.8rem; }
+    .pa-title{ font-size:1rem; }
+    .pa-text{ flex:1 1 0; min-width:0; }
+    .pa-sub{ display:none; }
+    .banner.parent-announcement a.pa-btn{ padding:8px 14px; font-size:.85rem; }
+  }
 
   .avail-grid{ display:grid; grid-template-columns: 90px repeat(4,1fr); gap:6px; }
   /* Who's here right now board (Sept 2026) — same look as .avail-grid (grid + colored .avail-cell
@@ -11175,7 +11196,10 @@ function renderParentTabsBar(activeTab){
 // don't count. To stop showing one, delete it from this list.
 var PARENT_ANNOUNCEMENTS=[
   { id:'summer-camp-2027', centres:['fivedock'], until:'2027-01-21', // all parents (Allie changed it from Year 6 and below, Nov 2026); // shown up to and including 21 Jan 2027
-    html:'☀️ <b>Mathnasium Summer Camp is now live!</b> Book through: <a href="https://www.mathsevents.com/events/summer-camp-2027" target="_blank" rel="noopener">mathsevents.com/events/summer-camp-2027</a>' }
+    html:'<span class="pa-emoji">☀️</span>'
+      +'<div class="pa-text"><div class="pa-title">Mathnasium Summer Camp is now live! 🎉</div>'
+      +'<div class="pa-sub">Book through: <a href="https://www.mathsevents.com/events/summer-camp-2027" target="_blank" rel="noopener">mathsevents.com/events/summer-camp-2027</a></div></div>'
+      +'<a class="pa-btn" href="https://www.mathsevents.com/events/summer-camp-2027" target="_blank" rel="noopener">Book now →</a>' }
 ];
 function parentAnnouncementsHtml(parent){
   const todayKey=toKey(simNow());
@@ -11185,7 +11209,7 @@ function parentAnnouncementsHtml(parent){
     if(a.until && todayKey>a.until) return false; // 'until' = last day shown (YYYY-MM-DD)
     if(a.maxYear!=null && !kids.some(function(s){ return s.year!=null && s.year<=a.maxYear; })) return false;
     return true;
-  }).map(function(a){ return '<div class="banner info parent-announcement">'+a.html+'</div>'; }).join('');
+  }).map(function(a){ return '<div class="banner parent-announcement">'+a.html+'</div>'; }).join('');
 }
 function renderParent(){
   // See the matching comment in renderInstructor() — same old pre-Supabase demo mechanism, same fix.
