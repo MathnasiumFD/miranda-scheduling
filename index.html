@@ -180,6 +180,8 @@
   .banner.info{ background:var(--info-bg); color:var(--info); }
   .banner.danger{ background:var(--danger-bg); color:var(--danger); }
   .banner.accent{ background:var(--accent-bg); color:var(--accent); }
+  .banner.parent-announcement{ font-size:.95rem; display:block; padding:12px 14px; }
+  .banner.parent-announcement a{ color:inherit; font-weight:700; }
 
   .avail-grid{ display:grid; grid-template-columns: 90px repeat(4,1fr); gap:6px; }
   /* Who's here right now board (Sept 2026) — same look as .avail-grid (grid + colored .avail-cell
@@ -11165,6 +11167,25 @@ function renderParentTabsBar(activeTab){
     return '<button class="subtab'+(t.id===activeTab?' active':'')+'" onclick="setParentTab(\''+t.id+'\')">'+t.label+'</button>';
   }).join('')+'</div>';
 }
+// Announcement banners at the top of a parent's page, on every tab (Nov 2026, per Allie: "I need all
+// of our parents of primary aged children (anything yr6 or below) to have banner at the top of their
+// MATHQ page that says ... Mathnasium Summer Camp is now live!"). Each one is limited to certain
+// centres (so one centre's event never shows at another) and, optionally, to families with at least
+// one current child in Year `maxYear` or below (Pre-K/K count as below). Finished or held children
+// don't count. To stop showing one, delete it from this list.
+var PARENT_ANNOUNCEMENTS=[
+  { id:'summer-camp-2027', centres:['fivedock'], maxYear:6,
+    html:'<b>Mathnasium Summer Camp is now live!</b> Book through: <a href="https://www.mathsevents.com/events/summer-camp-2027" target="_blank" rel="noopener">mathsevents.com/events/summer-camp-2027</a>' }
+];
+function parentAnnouncementsHtml(parent){
+  const todayKey=toKey(simNow());
+  const kids=(parent.studentIds||[]).map(findStudent).filter(function(s){ return s && !s.heldUntil && !(s.stoppedFrom && toKey(s.stoppedFrom)<=todayKey); });
+  return PARENT_ANNOUNCEMENTS.filter(function(a){
+    if(a.centres && a.centres.indexOf(CENTRE_ID)<0) return false;
+    if(a.maxYear!=null && !kids.some(function(s){ return s.year!=null && s.year<=a.maxYear; })) return false;
+    return true;
+  }).map(function(a){ return '<div class="banner info parent-announcement">'+a.html+'</div>'; }).join('');
+}
 function renderParent(){
   // See the matching comment in renderInstructor() — same old pre-Supabase demo mechanism, same fix.
   const parentId = supabaseClient ? (currentUser && currentUser.parentId) : state.parentLoggedIn;
@@ -11177,7 +11198,7 @@ function renderParent(){
   // whole view. Sept 2026, after Allie reported "loading data has failed" for a parent at login.
   if(!parent) return '<div class="card"><p class="small muted">Your login isn\'t linked to a parent record — ask front desk to check your account.</p></div>';
   const tab=PARENT_TABS.some(function(t){ return t.id===state.parentTab; })? state.parentTab : 'home';
-  let html=renderParentTabsBar(tab);
+  let html=parentAnnouncementsHtml(parent)+renderParentTabsBar(tab);
   if(tab==='summer'){ html+=renderParentSummerTab(parent); html+=renderTermBreakBookingModal(); html+=renderTermBreakRecurringModal(); return html; }
 
   html+='<div class="card"><div class="card-head"><h2>Welcome, '+parent.name+'</h2><button class="btn sm ghost" onclick="'+(supabaseClient?'logOut()':'parentLogout()')+'">Log out</button></div>'
