@@ -180,7 +180,7 @@
   .banner.info{ background:var(--info-bg); color:var(--info); }
   .banner.danger{ background:var(--danger-bg); color:var(--danger); }
   .banner.accent{ background:var(--accent-bg); color:var(--accent); }
-  .banner.parent-announcement{ font-size:.95rem; display:block; padding:12px 14px; }
+  .banner.parent-announcement{ font-size:.95rem; display:block; padding:12px 14px; background:var(--danger-bg); color:var(--danger); border:1px solid var(--danger); }
   .banner.parent-announcement a{ color:inherit; font-weight:700; }
 
   .avail-grid{ display:grid; grid-template-columns: 90px repeat(4,1fr); gap:6px; }
@@ -11175,7 +11175,7 @@ function renderParentTabsBar(activeTab){
 // don't count. To stop showing one, delete it from this list.
 var PARENT_ANNOUNCEMENTS=[
   { id:'summer-camp-2027', centres:['fivedock'], until:'2027-01-21', // all parents (Allie changed it from Year 6 and below, Nov 2026); // shown up to and including 21 Jan 2027
-    html:'<b>Mathnasium Summer Camp is now live!</b> Book through: <a href="https://www.mathsevents.com/events/summer-camp-2027" target="_blank" rel="noopener">mathsevents.com/events/summer-camp-2027</a>' }
+    html:'☀️ <b>Mathnasium Summer Camp is now live!</b> Book through: <a href="https://www.mathsevents.com/events/summer-camp-2027" target="_blank" rel="noopener">mathsevents.com/events/summer-camp-2027</a>' }
 ];
 function parentAnnouncementsHtml(parent){
   const todayKey=toKey(simNow());
