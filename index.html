@@ -41,6 +41,14 @@
     --online:#7fc4f5; --online-bg:#1b3a4a; --purple:#c4a3fb; --purple-bg:#2d2140;
     --shadow:0 1px 3px rgba(0,0,0,.5);
   }
+  /* Night mode links (Nov 2026, per Allie: "on night mode, the links for the parents are still coming
+     up in blue, its gross. can we change it to gray?") — nothing set a link colour, so the browser's
+     default dark blue showed. Grey in night mode only; daytime is unchanged. Placed before the other
+     rules so a link styled on purpose (e.g. the Summer Camp banner's) still wins. */
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]) a{ color:var(--text-muted); }
+  }
+  :root[data-theme="dark"] a{ color:var(--text-muted); }
 
   *{ box-sizing:border-box; }
   body{ margin:0; background:var(--bg); color:var(--text); font-family:var(--font); }
