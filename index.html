@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Scheduling</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="theme-color" content="#ef3e33">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="MATHQ">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Plus+Jakarta+Sans:wght@700;800&display=swap" rel="stylesheet">
@@ -188,6 +196,11 @@
   .banner.info{ background:var(--info-bg); color:var(--info); }
   .banner.danger{ background:var(--danger-bg); color:var(--danger); }
   .banner.accent{ background:var(--accent-bg); color:var(--accent); }
+  /* "Get the MATHQ app" card (Nov 2026) — phones only, until installed or dismissed. */
+  .install-card{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; background:var(--surface); border:1px solid var(--border); border-radius:14px; box-shadow:var(--shadow); padding:12px 14px; margin-bottom:14px; font-size:.85rem; color:var(--text); }
+  .install-card img{ width:44px; height:44px; border-radius:10px; border:1px solid var(--border); flex:0 0 auto; }
+  .install-card .install-text{ flex:1 1 180px; line-height:1.4; }
+  .install-card .ios-share{ display:inline-block; font-weight:700; color:var(--online); }
   /* Parent announcement banner — Summer Camp redesign (Nov 2026, per Allie's brief: bright, summery,
      Mathnasium red + sunny yellow + orange + warm cream, big bold headline, playful but not childish,
      strong red call-to-action). Keeps her earlier asks: thick red border, gentle pulse, and it stays
@@ -6769,7 +6782,7 @@ function render(){
   // shows straight away in the Availability Lookup and parents' options (Oct 2026).
   clearRatioCache();
   const perfStart=performance.now();
-  app.innerHTML = renderTop() + renderTabs() + renderRole() + (state.toast? '<div class="toast">'+state.toast+'</div>':'') + renderFooter();
+  app.innerHTML = renderTop() + renderTabs() + installPromptHtml() + renderRole() + (state.toast? '<div class="toast">'+state.toast+'</div>':'') + renderFooter();
   notePerf(performance.now()-perfStart);
   if(Math.abs((window.pageYOffset||document.documentElement.scrollTop||0)-pageY)>1) window.scrollTo(0, pageY);
   const newOverlay=app.querySelector('.overlay');
@@ -6840,6 +6853,51 @@ function renderTop(){
   return '<div class="top">'
     +'<div><div class="brand-logo mathq-logo"><img src="'+MATHQ_LOGO+'" alt="MATHQ — Scheduling Hub"/></div><div class="small muted" style="margin-top:2px">'+CENTRE.name+'</div></div>'
     +clockControls
+  +'</div>';
+}
+// Install as a phone app (Nov 2026, per Allie: "ok lets do option 1"). The site is an installable web
+// app: manifest.webmanifest + icons + sw.js sit beside index.html on each centre's site (deploy/).
+// The background script only makes it installable / opens offline — the page itself is always fetched
+// fresh, so updates still reach everyone straight away. On a phone that hasn't installed it yet, a
+// small card explains how: Android/Chrome gets a real "Install" button (beforeinstallprompt); iPhone
+// has no such button, so it shows the Share → "Add to Home Screen" steps. "Not now" hides it on that
+// device for 30 days. Never shown inside the installed app or on a computer.
+var installPromptEvent=null;
+if(typeof window!=='undefined'){
+  if('serviceWorker' in navigator && (location.protocol==='https:' || location.hostname==='localhost')){
+    window.addEventListener('load', function(){ navigator.serviceWorker.register('sw.js').catch(function(){}); });
+  }
+  window.addEventListener('beforeinstallprompt', function(e){ e.preventDefault(); installPromptEvent=e; try{ render(); }catch(err){} });
+  window.addEventListener('appinstalled', function(){ installPromptEvent=null; try{ localStorage.setItem('mathqInstalled','1'); render(); }catch(err){} });
+}
+function appIsInstalled(){
+  try{ return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone===true || localStorage.getItem('mathqInstalled')==='1'; }catch(e){ return false; }
+}
+function isIosDevice(){ return /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1); }
+function isPhoneOrTablet(){ return isIosDevice() || /Android/i.test(navigator.userAgent); }
+function installPromptDismissed(){
+  try{ const t=+localStorage.getItem('mathqInstallDismissed')||0; return t && (Date.now()-t) < 30*86400000; }catch(e){ return false; }
+}
+function dismissInstallPrompt(){ try{ localStorage.setItem('mathqInstallDismissed', String(Date.now())); }catch(e){} render(); }
+function installApp(){
+  if(!installPromptEvent) return;
+  const ev=installPromptEvent; installPromptEvent=null;
+  ev.prompt();
+  ev.userChoice.then(function(r){ if(r && r.outcome==='accepted'){ try{ localStorage.setItem('mathqInstalled','1'); }catch(e){} } render(); }).catch(function(){ render(); });
+}
+function installPromptHtml(){
+  if(typeof window==='undefined' || appIsInstalled() || installPromptDismissed() || !isPhoneOrTablet()) return '';
+  const canPrompt=!!installPromptEvent;
+  const ios=isIosDevice();
+  if(!canPrompt && !ios) return ''; // e.g. an Android browser that doesn't support installing
+  return '<div class="install-card">'
+    +'<img src="icons/icon-192.png" alt="" onerror="this.style.display=\'none\'"/>'
+    +'<div class="install-text"><b>Get the MATHQ app</b><br>'
+      +(canPrompt? 'Add MATHQ to your home screen — it opens straight to your schedule.'
+        : 'Tap <b>Share</b> <span class="ios-share">⬆︎</span>, then <b>Add to Home Screen</b>.')
+    +'</div>'
+    +(canPrompt? '<button class="btn sm primary" onclick="installApp()">Install</button>' : '')
+    +'<button class="btn sm ghost" onclick="dismissInstallPrompt()">Not now</button>'
   +'</div>';
 }
 function renderTabs(){
