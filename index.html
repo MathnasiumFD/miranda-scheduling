@@ -591,6 +591,8 @@ var CHECKIN_EMAIL_ENABLED=true;
 // otherwise query the sessions row before that update has actually committed, and email out the
 // default 90-min time instead of the finish time the parent/front-desk just picked.
 function notifyParentOfCheckIn(sessionId, actualStartMin, actualEndMin){
+  const sess=findSession(sessionId);
+  if(sess) sendPush('checkin', {sessionId:sessionId, studentId:sess.studentId, startMin:actualStartMin}); // phone notification — arrival only, never check-out
   if(!CHECKIN_EMAIL_ENABLED || !supabaseClient || !currentUser) return;
   supabaseClient.functions.invoke('send-checkin-email', {body:{sessionId, actualStartMin, actualEndMin}}).then(function(r){
     if(r && r.error) console.error('Check-in email failed:', r.error);
@@ -619,6 +621,7 @@ function notifyClosureReminders(){
 // so it doesn't just sit quietly until someone happens to open the Parent Requests panel.
 var ENROLLMENT_REQUEST_EMAIL_ENABLED=true;
 function notifyFrontDeskOfEnrollmentRequest(requestId){
+  sendPush('request', {requestId:requestId});
   if(!ENROLLMENT_REQUEST_EMAIL_ENABLED || !supabaseClient || !currentUser) return;
   supabaseClient.functions.invoke('send-enrollment-request-email', {body:{requestId:requestId}}).then(function(r){
     if(r && r.error) console.error('Enrollment request email failed:', r.error);
@@ -981,6 +984,11 @@ function saveClosedDayForm(){
   // A daily job normally emails families once a closure is 7 days out — but if this one's
   // already inside that window, don't make them wait for tomorrow's run.
   if(cancelled>0 && daysUntil(simNow(), date)<=7){ notifyClosureReminders(); }
+  // Phone notification straight away to each family whose session was cancelled by it (Nov 2026).
+  if(cancelled>0){
+    const ids=credits.filter(function(c){ return c.source==='closure' && toKey(c.issuedDate)===toKey(date); }).map(function(c){ return c.studentId; });
+    if(ids.length) sendPush('closure', {date:toKey(date), studentIds:ids.filter(function(v,i,a){ return a.indexOf(v)===i; })});
+  }
 }
 function removeClosedDay(id){
   closedDays=closedDays.filter(function(c){ return c.id!==id; });
@@ -2924,6 +2932,7 @@ function approveEnrollmentRequest(id){
   else { applyStopEnrollment(student, req.effectiveFrom, req.note); }
   req.status='approved';
   dbWrite('approving an enrolment request', function(){ return supabaseClient.from('enrollment_requests').update({status:'approved'}).eq('id', req.id); });
+  sendPush('decision', {requestId:req.id, status:'approved'});
   render();
 }
 function declineEnrollmentRequest(id){
@@ -2931,6 +2940,7 @@ function declineEnrollmentRequest(id){
   if(!req) return;
   req.status='declined';
   dbWrite('declining an enrolment request', function(){ return supabaseClient.from('enrollment_requests').update({status:'declined'}).eq('id', req.id); });
+  sendPush('decision', {requestId:req.id, status:'declined'});
   toast('Request declined.');
   render();
 }
@@ -6782,7 +6792,7 @@ function render(){
   // shows straight away in the Availability Lookup and parents' options (Oct 2026).
   clearRatioCache();
   const perfStart=performance.now();
-  app.innerHTML = renderTop() + renderTabs() + installPromptHtml() + renderRole() + (state.toast? '<div class="toast">'+state.toast+'</div>':'') + renderFooter();
+  app.innerHTML = renderTop() + renderTabs() + installPromptHtml() + pushPromptHtml() + renderRole() + (state.toast? '<div class="toast">'+state.toast+'</div>':'') + renderFooter();
   notePerf(performance.now()-perfStart);
   if(Math.abs((window.pageYOffset||document.documentElement.scrollTop||0)-pageY)>1) window.scrollTo(0, pageY);
   const newOverlay=app.querySelector('.overlay');
@@ -8176,7 +8186,10 @@ function renderStaff(){
   } else if(tab==='students'){
     html+=renderStudentsPanel();
   } else if(tab==='parents'){
+    // One-off phone notification to all parents (Nov 2026, per Allie: "Announcements").
+    if(supabaseClient) html+='<div style="display:flex;justify-content:flex-end;margin-bottom:10px"><button class="btn sm" onclick="openBroadcastForm()">📣 Send a notification to all parents</button></div>';
     html+=renderParentsPanel();
+    html+=renderBroadcastModal();
   } else if(tab==='staff'){
     // The day-by-day coverage grid used to live here (Sept 2026 reorg); it's since moved on to the
     // Today tab (see the tab==='today' branch above) — this tab is just the instructor/front-desk-
@@ -10766,6 +10779,7 @@ function coverOfferClash(req, instructorId){
 }
 function emailCoverOffers(offerIds){
   if(!offerIds.length || !supabaseClient || !currentUser) return;
+  sendPush('cover', {offerIds:offerIds}); // only still-pending offers get a phone notification
   supabaseClient.functions.invoke('send-cover-offer-email', {body:{offerIds:offerIds}}).then(function(r){
     const err=(r.error && (r.error.message||String(r.error))) || (r.data && r.data.error);
     if(err) toast('The offer was saved, but the email to the instructor didn\'t send — '+err, 8000);
@@ -12043,7 +12057,135 @@ function setNewPassword(){
 }
 
 function logOut(){
-  supabaseClient.auth.signOut().then(function(){ location.reload(); });
+  // Stop this phone getting the signed-out person's notifications (Nov 2026) — then sign out.
+  pushUnsubscribeThisDevice().then(function(){ return supabaseClient.auth.signOut(); }, function(){ return supabaseClient.auth.signOut(); })
+    .then(function(){ location.reload(); });
+}
+
+/* ---------- phone notifications (Nov 2026, per Allie) ----------
+   The send-push Edge Function does the sending (see send-push.ts for which events notify whom).
+   This side: a "Turn on notifications" card for each signed-in person, saving this phone's push
+   address to push_subscriptions; sendPush() to tell the function something happened; and the
+   front desk "Send a notification to all parents" box. On iPhone, notifications only work inside
+   the installed app (iOS 16.4+), so there the card only appears once MATHQ is on the home screen. */
+var pushState={supported:false, publicKey:null, subscribed:false, checked:false, busy:false};
+function sendPush(event, data){
+  if(!supabaseClient || !currentUser) return;
+  supabaseClient.functions.invoke('send-push', {body:Object.assign({event:event}, data||{})}).then(function(r){
+    const err=(r && r.error) || (r && r.data && r.data.error);
+    if(err) console.warn('Notification not sent ('+event+'):', err);
+  }).catch(function(err){ console.warn('Notification not sent ('+event+'):', err); });
+}
+function pushSupported(){
+  return typeof window!=='undefined' && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
+    && (location.protocol==='https:' || location.hostname==='localhost');
+}
+function urlB64ToUint8Array(b64){
+  const pad='='.repeat((4-b64.length%4)%4);
+  const raw=atob((b64+pad).replace(/-/g,'+').replace(/_/g,'/'));
+  const out=new Uint8Array(raw.length); for(let i=0;i<raw.length;i++) out[i]=raw.charCodeAt(i);
+  return out;
+}
+// Runs once after sign-in: is this phone already subscribed? If notifications were allowed before but
+// the saved address is missing (or belongs to someone who signed out), quietly save it again.
+function pushCheck(){
+  if(pushState.checked || !supabaseClient || !currentUser) return;
+  pushState.checked=true;
+  pushState.supported=pushSupported();
+  if(!pushState.supported) return;
+  supabaseClient.functions.invoke('send-push', {body:{event:'config'}}).then(function(r){
+    pushState.publicKey=(r && r.data && r.data.publicKey) || null;
+    if(!pushState.publicKey) return;
+    return navigator.serviceWorker.ready.then(function(reg){ return reg.pushManager.getSubscription(); }).then(function(sub){
+      if(sub && Notification.permission==='granted'){ pushState.subscribed=true; return pushSave(sub); }
+    });
+  }).then(function(){ render(); }).catch(function(){});
+}
+function pushSave(sub){
+  const j=sub.toJSON();
+  return supabaseClient.auth.getUser().then(function(u){
+    const uid=u && u.data && u.data.user && u.data.user.id; if(!uid) return;
+    return supabaseClient.from('push_subscriptions').upsert({user_id:uid, endpoint:j.endpoint, p256dh:j.keys.p256dh, auth:j.keys.auth, user_agent:navigator.userAgent.slice(0,200)}, {onConflict:'endpoint'});
+  });
+}
+function pushTurnOn(){
+  if(pushState.busy || !pushState.publicKey) return;
+  pushState.busy=true; render();
+  Notification.requestPermission().then(function(p){
+    if(p!=='granted') throw new Error(p==='denied'? 'denied' : 'dismissed');
+    return navigator.serviceWorker.ready;
+  }).then(function(reg){
+    return reg.pushManager.getSubscription().then(function(s){ return s || reg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:urlB64ToUint8Array(pushState.publicKey)}); });
+  }).then(function(sub){ return pushSave(sub).then(function(){ pushState.subscribed=true; toast('Notifications are on for this device.'); }); })
+  .catch(function(err){
+    toast(err && err.message==='denied'
+      ? 'Notifications are blocked for MATHQ. To allow them, turn them on for MATHQ in your phone\'s Settings.'
+      : 'Notifications weren\'t turned on.', 7000);
+  }).then(function(){ pushState.busy=false; render(); });
+}
+function pushUnsubscribeThisDevice(){
+  if(!pushSupported() || !supabaseClient) return Promise.resolve();
+  return navigator.serviceWorker.getRegistration().then(function(reg){ return reg && reg.pushManager.getSubscription(); }).then(function(sub){
+    if(!sub) return;
+    const ep=sub.endpoint;
+    return supabaseClient.from('push_subscriptions').delete().eq('endpoint', ep).then(function(){ return sub.unsubscribe(); });
+  }).catch(function(){});
+}
+function pushDismissed(){ try{ const t=+localStorage.getItem('mathqPushDismissed')||0; return t && (Date.now()-t) < 30*86400000; }catch(e){ return false; } }
+function dismissPushPrompt(){ try{ localStorage.setItem('mathqPushDismissed', String(Date.now())); }catch(e){} render(); }
+function pushPromptHtml(){
+  if(!supabaseClient || !currentUser) return '';
+  pushCheck();
+  if(!pushState.supported || !pushState.publicKey || pushState.subscribed || pushDismissed()) return '';
+  if(typeof Notification!=='undefined' && Notification.permission==='denied') return '';
+  if(isIosDevice() && !appIsInstalled()) return ''; // iPhone: install first (the install card covers that)
+  const what = currentUser.role==='parent' ? 'when your child arrives, about make-up credits and closures, and centre news.'
+    : currentUser.role==='instructor' ? 'when you\'re offered a cover shift.'
+    : 'when a parent sends a hold, cancellation or time change request.';
+  return '<div class="install-card"><div style="font-size:1.6rem;line-height:1">🔔</div>'
+    +'<div class="install-text"><b>Turn on notifications</b><br>Get a notification on this device '+what+'</div>'
+    +'<button class="btn sm primary" onclick="pushTurnOn()"'+(pushState.busy?' disabled':'')+'>'+(pushState.busy?'Turning on…':'Turn on')+'</button>'
+    +'<button class="btn sm ghost" onclick="dismissPushPrompt()">Not now</button></div>';
+}
+// Front desk: a one-off notification to every parent with notifications on (Parents tab).
+function openBroadcastForm(){ state.broadcastForm={title:'', body:'', error:'', count:null}; render();
+  // How many parents would get it: parents' logins that have at least one phone signed up.
+  if(supabaseClient) Promise.all([
+    supabaseClient.from('push_subscriptions').select('user_id'),
+    supabaseClient.from('app_users').select('auth_user_id').eq('role','parent')
+  ]).then(function(rs){
+    if(!state.broadcastForm) return;
+    const parentIds={}; (rs[1].data||[]).forEach(function(a){ parentIds[a.auth_user_id]=true; });
+    const seen={}; (rs[0].data||[]).forEach(function(s){ if(parentIds[s.user_id]) seen[s.user_id]=true; });
+    state.broadcastForm.count=Object.keys(seen).length; render();
+  });
+}
+function closeBroadcastForm(){ state.broadcastForm=null; render(); }
+function setBroadcastField(k,v){ state.broadcastForm[k]=v; state.broadcastForm.error=''; }
+function sendBroadcast(){
+  const f=state.broadcastForm; if(!f) return;
+  if(!f.title.trim() || !f.body.trim()){ f.error='Add a title and a message.'; render(); return; }
+  if(!confirm('Send this notification to every parent with notifications turned on?')) return;
+  f.sending=true; render();
+  supabaseClient.functions.invoke('send-push', {body:{event:'broadcast', title:f.title, body:f.body}}).then(function(r){
+    const err=(r.error && (r.error.message||String(r.error))) || (r.data && r.data.error);
+    if(err){ f.sending=false; f.error=err; render(); return; }
+    state.broadcastForm=null;
+    toast('Notification sent to '+((r.data && r.data.sent)||0)+' phone'+(((r.data && r.data.sent)||0)===1?'':'s')+'.', 6000);
+  });
+}
+function renderBroadcastModal(){
+  const f=state.broadcastForm; if(!f) return '';
+  let html='<div class="overlay" onclick="if(event.target===this) closeBroadcastForm()"><div class="modal">';
+  html+='<h3>📣 Send a notification to all parents</h3>';
+  html+='<p>Goes to every parent who has turned on notifications in the MATHQ app'+(f.count!=null? ' — currently <b>'+f.count+'</b> '+(f.count===1?'parent':'parents')+'' : '')+'. Use it sparingly — too many and people switch them off.</p>';
+  if(f.error) html+='<div class="banner danger">'+escapeHtml(f.error)+'</div>';
+  html+='<label>Title</label><input type="text" maxlength="80" placeholder="e.g. Summer Camp bookings are open! ☀️" value="'+escapeHtml(f.title)+'" oninput="setBroadcastField(\'title\',this.value)"/>';
+  html+='<label>Message</label><textarea maxlength="240" rows="3" placeholder="e.g. Book through the link in MATHQ before spots fill up." oninput="setBroadcastField(\'body\',this.value)">'+escapeHtml(f.body)+'</textarea>';
+  html+='<div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end"><button class="btn ghost" onclick="closeBroadcastForm()">Cancel</button>'
+    +'<button class="btn primary" onclick="sendBroadcast()"'+(f.sending?' disabled':'')+'>'+(f.sending?'Sending…':'Send notification')+'</button></div>';
+  html+='</div></div>';
+  return html;
 }
 
 // Live sync across open tabs/devices (Sept 2026, per Allie: "if there are two members of staff
