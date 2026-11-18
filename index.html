@@ -4660,12 +4660,49 @@ function setCheckOutSession(sessionId){ state.checkOut.sessionId=sessionId; rend
 function setCheckOutExit(v){ state.checkOut.exitTime=Number(v); render(); }
 function confirmCheckOut(){
   const sess=findSession(state.checkOut.sessionId);
+  sess.endBeforeCheckOut=sess.actualEnd; // so an accidental check-out can be undone back to their planned finish
   sess.actualEnd=state.checkOut.exitTime;
   sess.checkedOut=true;
   dbWrite('checking out', function(){ return supabaseClient.from('sessions').update({actual_end_min:sess.actualEnd, checked_out:true}).eq('id', sess.id); });
   toast(findStudent(sess.studentId).name+' checked out at '+minToLabel(sess.actualEnd)+'.');
   state.checkOut=null;
   render();
+}
+
+// Checked out today (Nov 2026, per Allie: "I need a list at the bottom of the today tab that keep
+// track of students checked out in case we accidentally check them out"). Most recent first, each
+// with "Undo check-out", which puts the child straight back on the Checked in / Who's here boards with
+// the finish time they had before (or, after a page refresh, the one worked out from their arrival).
+function checkedOutToday(){
+  const todayKey=toKey(simNow());
+  return sessionsOnDate(todayKey).filter(function(s){ return s.status==='attended' && s.checkedOut; })
+    .sort(function(a,b){ return (b.actualEnd||0)-(a.actualEnd||0); });
+}
+function undoCheckOut(sessionId){
+  const sess=findSession(sessionId);
+  if(!sess || !sess.checkedOut) return;
+  const back = sess.endBeforeCheckOut!=null? sess.endBeforeCheckOut : autoExitTime(sess, sess.checkInOffset||0);
+  sess.checkedOut=false;
+  sess.actualEnd=back;
+  delete sess.endBeforeCheckOut;
+  dbWrite('undoing a check-out', function(){ return supabaseClient.from('sessions').update({actual_end_min:back, checked_out:false}).eq('id', sess.id); });
+  toast(findStudent(sess.studentId).name+' is checked back in (finishing '+minToLabel(back)+').');
+  render();
+}
+function renderCheckedOutTodayPanel(){
+  const list=checkedOutToday();
+  let html=sectionOpen('checkedOutToday','Checked out today ('+list.length+')','');
+  html+='<p class="small muted" style="margin-top:0">Everyone who has left today, most recent first. Checked someone out by mistake? Use <b>Undo check-out</b> to put them straight back.</p>';
+  if(!list.length){ html+='<div class="empty-note">Nobody has been checked out yet today.</div></div>'; return html; }
+  html+='<table><tr><th>Student</th><th>Pod</th><th>Arrived</th><th>Checked out</th><th></th></tr>';
+  list.forEach(function(s){
+    const st=findStudent(s.studentId)||{name:'(unknown)'};
+    const where=s.online? 'Online' : (s.podId && findPod(s.podId)? findPod(s.podId).name : '—');
+    html+='<tr><td>'+st.name+'</td><td>'+where+'</td><td>'+(s.actualStart!=null? minToLabel(s.actualStart) : '—')+'</td><td>'+(s.actualEnd!=null? minToLabel(s.actualEnd) : '—')+'</td>'
+      +'<td style="text-align:right"><button class="btn sm ghost" onclick="undoCheckOut(\''+s.id+'\')">Undo check-out</button></td></tr>';
+  });
+  html+='</table></div>';
+  return html;
 }
 
 // Auto-checks-out anyone still checked in (and not yet checked out) once the centre's own closing
@@ -8138,6 +8175,7 @@ function renderStaff(){
         +(WEEKDAY_KEYS.indexOf(seatingWeekdayToday)>=0? renderPodSummaryStrip(dayKey, seatingWeekdayToday) : '<div class="empty-note">No sessions on weekends.</div>')
         +'</div>';
     }
+    html+=renderCheckedOutTodayPanel(); // bottom of Today (Nov 2026)
   } else if(tab==='schedule'){
     // Availability lookup sits at the top of Schedule (Sept 2026, per Allie: "move availability
     // lookup to the top of the schedule tab"). The day-by-day coverage grid that used to sit directly
