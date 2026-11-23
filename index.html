@@ -337,7 +337,13 @@
      those environments simply won't have `window.supabase`, and the app below falls back to its
      built-in demo data whenever that's the case (see the LIVE-MODE check at the bottom of the
      script). -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<!-- Nov 2026: the Supabase library is served from the app's own site (deploy/vendor/), pinned to one
+     version, so ad blockers or network filters that block cdn.jsdelivr.net can no longer knock a
+     real login into demo mode. If the site's own copy is missing for any reason, the same pinned
+     version is tried from the CDN as a backup. To upgrade: download the new dist/umd/supabase.js
+     into deploy/vendor/ under its version name and update both addresses below. -->
+<script src="vendor/supabase-js-2.119.2.js"></script>
+<script>window.supabase || document.write('<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.2/dist/umd/supabase.js"><\/script>');</script>
 
 <script>
 /* ---------- Supabase (live mode) ---------- */
@@ -11937,6 +11943,37 @@ function renderFooter(){
    original demo bootstrap at the very bottom — nothing here can break that path.
    ============================================================ */
 
+// True on a real published centre website (the Vercel sites, or any address listed in CENTRES),
+// where demo mode must never appear. False for a local file, localhost test servers, preview
+// copies elsewhere and the Node tests, which keep the built-in demo data.
+function isRealSite(){
+  if(typeof window==='undefined' || !window.location) return false;
+  if(!/^https?:$/.test(window.location.protocol)) return false;
+  const host=(window.location.hostname||'').toLowerCase();
+  if(/\.vercel\.app$/.test(host)) return true;
+  return Object.keys(CENTRES).some(function(k){
+    try { return CENTRES[k].siteUrl && new URL(CENTRES[k].siteUrl).hostname.toLowerCase()===host; } catch(e){ return false; }
+  });
+}
+
+function showConnectionErrorScreen(){
+  const app=document.getElementById('app');
+  if(!app) return;
+  app.innerHTML =
+    '<div class="login-wrap"><div class="card login-card">'
+    +'<h2>Can\'t connect right now</h2>'
+    +'<div class="banner danger">The app couldn\'t load the part that connects to your centre\'s data, so it can\'t sign you in.</div>'
+    +'<p class="small">This is usually one of these:</p>'
+    +'<ul class="small" style="display:inline-block;text-align:left;margin:0 0 12px;padding-left:18px">'
+      +'<li>a weak or dropped internet connection</li>'
+      +'<li>an ad blocker or privacy extension in this browser</li>'
+      +'<li>a school or work Wi-Fi filter</li>'
+    +'</ul>'
+    +'<p class="small">Check your connection and reload. If it keeps happening, try a private window or another Wi-Fi.</p>'
+    +'<button class="btn" onclick="location.reload()">Reload</button>'
+    +'</div></div>';
+}
+
 function showLoginScreen(errorMsg){
   const app=document.getElementById('app');
   app.innerHTML =
@@ -12892,6 +12929,12 @@ if(supabaseClient){
       showLoginScreen(); // provisional — a following SIGNED_IN with a real session still overrides this
     }
   });
+} else if(isRealSite()){
+  // Nov 2026: on the real website, a missing Supabase library means it was blocked or failed to
+  // download (ad blocker, network filter, patchy connection). Previously this fell through to the
+  // demo bootstrap below, so staff and parents saw sample students that looked real, with no sign
+  // anything was wrong. Now it says so plainly instead. Demo mode stays for local files/localhost.
+  showConnectionErrorScreen();
 } else {
   // Offline / test-harness fallback — exactly the original demo bootstrap, untouched.
   students.forEach(function(s){ s.baseYear=s.year; s.yearBaseline=schoolYearIndex(BASE); s.holds=s.holds||[]; });
