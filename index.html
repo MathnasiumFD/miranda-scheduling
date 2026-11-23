@@ -6799,6 +6799,13 @@ function flushPerf(){
 }
 if(typeof window!=='undefined') setInterval(flushPerf, 300000);
 function render(){
+  // Nov 2026 (Allie: "its showing the simulated today"): on the live site nothing may draw the app
+  // until someone is signed in. Chrome fires 'beforeinstallprompt' a moment after the page loads
+  // (never in incognito), and that handler calls render() — which, with no one signed in, drew the
+  // demo view ("Simulated today", sample students) right over the sign-in screen. The same was true
+  // of anything else that re-renders after logout (e.g. the 3-minute background refresh). The
+  // sign-in, set-password and can't-connect screens draw themselves directly, not through render().
+  if(typeof window!=='undefined' && ((supabaseClient && !currentUser) || (!supabaseClient && isRealSite()))) return;
   const app=document.getElementById('app');
   const active = (typeof document!=='undefined') ? document.activeElement : null;
   // Only text/search/tel/password/textarea reliably support reading/setting a cursor position in
