@@ -7278,6 +7278,10 @@ function liveOccupancyGroups(dayKey){
     // podShiftsOn (Oct 2026): a Pod staffed only by a one-off day override shows up too, and one
     // whose day override marks it Unassigned doesn't.
     else if(live && podShiftsOn(pod.id, new Date(dayKey)).some(function(s){ return !s.oneOff || s.instructorId; })){ groups.push({label:pod.name, podId:pod.id, entries:[]}); }
+    // Nov 2026 (Allie: "when i move someone to a pod not previously displayed, they disappear"):
+    // a Pod someone has been moved onto for today shows too, even with no kids and no shift today,
+    // so the staff member moved there stays on the board.
+    else if(live){ const fl=floorAssignmentFor(pod.id, dayKey); if(fl && fl.instructorId) groups.push({label:pod.name, podId:pod.id, entries:[]}); }
   });
   // Checked in but not sitting anywhere the board can draw — no Pod at all, a Pod that no longer
   // exists, or an Online group whose instructor can't be found. These used to be silently dropped
