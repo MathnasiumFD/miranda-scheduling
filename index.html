@@ -1796,6 +1796,7 @@ var state={
   bookingForm:{studentId:'', duration:90, start:null, overrideOk:false},
   podAssignForm:null,
   quickCoverageForm:null,
+  staffPodMoveForm:null, // move a staff member to another Pod, today only (Nov 2026)
   quickMoveForm:null,
   parentBookingCreditId:null,
   newStudentForm:null,
@@ -7330,11 +7331,13 @@ function podInstructorLabel(podId, dayKey){
   const date=new Date(dayKey);
   // podShiftsOn (Oct 2026) — includes a one-off day override from the Today tab's Schedule grid.
   const blocks=podShiftsOn(podId, date);
-  if(!blocks.length) return null;
-  const nowMin=nowMinutesOfDay();
-  const block = blocks.find(function(b){ return nowMin>=b.start && nowMin<b.end; }) || blocks[blocks.length-1];
   // A floor move today (Oct 2026) — show who's actually minding the kids, with their own times.
+  // Checked before the "no shift" exit (Nov 2026): a staff member moved for today onto a Pod that
+  // has no shift of its own today still shows under that Pod's name.
   const fl=floorAssignmentFor(podId, dayKey);
+  if(!blocks.length && !(fl && fl.instructorId)) return null;
+  const nowMin=nowMinutesOfDay();
+  const block = blocks.find(function(b){ return nowMin>=b.start && nowMin<b.end; }) || blocks[blocks.length-1] || null;
   const instrId=fl? fl.instructorId : block.instructorId;
   if(!instrId) return null;
   // Oct 2026, per Allie ("whos here right now instructor times are weird" — right instructor, wrong
@@ -7348,12 +7351,12 @@ function podInstructorLabel(podId, dayKey){
   const avail=instructorAvailabilityOn(instrId, date);
   let until, from;
   if(shift) until = (avail && avail.end<shift.end)? minToLabel(avail.end) : (shift.closesLate? 'Close' : minToLabel(shift.end));
-  else until = avail? minToLabel(avail.end) : (block.closesLate? 'Close' : minToLabel(block.end));
+  else until = avail? minToLabel(avail.end) : (!block? '—' : block.closesLate? 'Close' : minToLabel(block.end));
   // Start time too (Oct 2026, per Allie): same rule mirrored — the earliest block they cover that
   // day in any Pod, pushed later if their availability that day starts later (a one-off "in at 4").
   if(shift) from = minToLabel((avail && avail.start>shift.start)? avail.start : shift.start);
-  else from = minToLabel(avail? avail.start : block.start);
-  return {name: findInstructor(instrId).name, until: until, from: from};
+  else from = avail? minToLabel(avail.start) : (block? minToLabel(block.start) : '—');
+  return {id: instrId, name: findInstructor(instrId).name, until: until, from: from};
 }
 // When an instructor's rostered day actually ends: the latest-ending shift block they're covering
 // on this date in any Pod (one-off coverage swaps included, via blockInstructorOn). null if they
@@ -7407,7 +7410,10 @@ function renderLiveOccupancyBoard(dayKey){
       const instr=podInstructorLabel(g.podId, dayKey);
       return '<div class="cal-head"'+headAttrs+'>'+g.label+' <span class="badge '+(occupancy>=cap?'full':'available')+'" style="margin-left:4px">'+occupancy+'/'+cap+'</span>'
         // Name grey; the times on one line, blue on a light blue background (Oct 2026, per Allie).
-        +(instr? '<br><span class="small muted">'+instr.name+'</span>'
+        // The name itself (live view only) moves that staff member to another Pod for today (Nov 2026).
+        +(instr? '<br>'+(live
+            ? '<a href="#" class="small" style="color:var(--muted);text-decoration:underline dotted" onclick="event.stopPropagation();openStaffPodMoveForm(\''+instr.id+'\',\''+g.podId+'\');return false;" title="Move '+escapeHtml(instr.name)+' to another Pod, today only">'+instr.name+'</a>'
+            : '<span class="small muted">'+instr.name+'</span>')
           +'<br><span class="small" style="white-space:nowrap;color:var(--online);background:var(--online-bg);padding:1px 6px;border-radius:6px;display:inline-block;margin-top:2px">'+instr.from+'–'+instr.until+'</span>' : '')
       +'</div>';
     }).join('');
@@ -7566,6 +7572,89 @@ function clearQuickCoverage(){
   toast(findPod(f.podId).name+' is back with its rostered instructor.');
   state.quickCoverageForm=null;
   render();
+}
+// Move a staff member to a different Pod, today only (Nov 2026, per Allie: "I also want to be able
+// to change the pod a staff member is currently on just for today ... without changing their
+// times"). Launched by clicking the instructor's name under a Pod's header on the live board — the
+// staff-first version of the Pod-first "Who's minding this Pod" switch above, built on the same floor
+// moves (pod_floor_assignments), so shifts, times, calendars, coverage and availability never change.
+// If someone is already minding the destination Pod, front desk chooses: swap them into the Pod
+// being left, or leave that Pod with nobody.
+function podMinderToday(podId){
+  const today=simNow(), todayKey=toKey(today);
+  const fl=floorAssignmentFor(podId, todayKey);
+  if(fl) return fl.instructorId||null;
+  const blocks=podShiftsOn(podId, today);
+  if(!blocks.length) return null;
+  const nowMin=nowMinutesOfDay();
+  const cur=blocks.find(function(b){ return nowMin>=b.start && nowMin<b.end; }) || blocks[blocks.length-1];
+  return cur.instructorId||null;
+}
+function setFloorMinderToday(podId, instrId){
+  const todayKey=toKey(simNow());
+  podFloorAssignments=podFloorAssignments.filter(function(x){ return !(x.podId===podId && x.dateKey===todayKey); });
+  podFloorAssignments.push({podId:podId, dateKey:todayKey, instructorId:instrId||null});
+  dbWrite('moving a staff member to another Pod today', function(){ return supabaseClient.from('pod_floor_assignments').upsert({pod_id:podId, the_date:todayKey, instructor_id:instrId||null, updated_at:new Date().toISOString()}, {onConflict:'pod_id,the_date'}); });
+  reseatPodSessionsToday(podId);
+}
+function openStaffPodMoveForm(instructorId, fromPodId){
+  state.staffPodMoveForm={instructorId:instructorId, fromPodId:fromPodId, toPodId:'', swap:true, error:''};
+  render();
+}
+function closeStaffPodMoveForm(){ state.staffPodMoveForm=null; render(); }
+function setStaffPodMoveField(field, value){
+  state.staffPodMoveForm[field]=value;
+  state.staffPodMoveForm.error='';
+  render();
+}
+function saveStaffPodMove(){
+  const f=state.staffPodMoveForm;
+  if(!f.toPodId){ f.error='Choose the Pod to move them to.'; render(); return; }
+  const name=findInstructor(f.instructorId).name;
+  const fromName=findPod(f.fromPodId).name, toName=findPod(f.toPodId).name;
+  const displaced=podMinderToday(f.toPodId);
+  const other=(displaced && displaced!==f.instructorId)? displaced : null;
+  setFloorMinderToday(f.toPodId, f.instructorId);
+  setFloorMinderToday(f.fromPodId, (other && f.swap)? other : null);
+  let msg=name+' is on '+toName+' today.';
+  if(other && f.swap) msg+=' '+findInstructor(other).name+' swapped to '+fromName+'.';
+  else msg+=' '+fromName+' has nobody minding it right now.';
+  toast(msg+' Nobody\'s times have changed.', 7000);
+  state.staffPodMoveForm=null;
+  render();
+}
+function renderStaffPodMoveModal(){
+  const f=state.staffPodMoveForm;
+  if(!f) return '';
+  const instr=findInstructor(f.instructorId), from=findPod(f.fromPodId);
+  if(!instr || !from) return '';
+  const displaced=f.toPodId? podMinderToday(f.toPodId) : null;
+  const other=(displaced && displaced!==f.instructorId)? findInstructor(displaced) : null;
+  let html='<div class="overlay" onclick="if(event.target===this) closeStaffPodMoveForm()"><div class="modal">';
+  html+='<h3>Move '+instr.name+' to another Pod today</h3>';
+  html+='<p>Today only: '+instr.name+' moves from <b>'+from.name+'</b> to the Pod you choose and minds its kids. <b>Their times don\'t change</b>, and neither do shifts, calendars or availability. Tomorrow everything is back to normal.</p>';
+  if(f.error) html+='<div class="banner danger">'+f.error+'</div>';
+  html+='<label>Move to</label><select onchange="setStaffPodMoveField(\'toPodId\',this.value)">'
+    +'<option value="">Choose a Pod…</option>'
+    +pods.filter(function(p){ return p.id!==f.fromPodId && p.active!==false; }).map(function(p){
+      const m=podMinderToday(p.id);
+      return '<option value="'+p.id+'"'+(p.id===f.toPodId?' selected':'')+'>'+p.name+(m? ' (now: '+findInstructor(m).name+')' : ' (nobody on it)')+'</option>';
+    }).join('')
+  +'</select>';
+  if(other){
+    html+='<div style="margin-top:10px"><div class="small" style="margin-bottom:4px"><b>'+other.name+'</b> is on '+findPod(f.toPodId).name+' right now. What should happen to them?</div>'
+      +'<label style="font-weight:400;display:block"><input type="radio" name="staffPodSwap" '+(f.swap?'checked':'')+' onchange="setStaffPodMoveField(\'swap\',true)"/> Swap: '+other.name+' moves to '+from.name+'</label>'
+      +'<label style="font-weight:400;display:block"><input type="radio" name="staffPodSwap" '+(!f.swap?'checked':'')+' onchange="setStaffPodMoveField(\'swap\',false)"/> No swap: '+other.name+' comes off the floor, '+from.name+' has nobody</label>'
+    +'</div>';
+  } else if(f.toPodId){
+    html+='<div class="small muted" style="margin-top:10px">'+from.name+' will have nobody minding it. You can put someone on it by clicking its Pod number.</div>';
+  }
+  html+='<div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">'
+    +'<button class="btn ghost" onclick="closeStaffPodMoveForm()">Cancel</button>'
+    +'<button class="btn primary" onclick="saveStaffPodMove()">Move for today</button>'
+  +'</div>';
+  html+='</div></div>';
+  return html;
 }
 function renderQuickCoverageModal(){
   const f=state.quickCoverageForm;
@@ -8529,6 +8618,7 @@ function renderCheckedInPanel(){
     html+='</table>';
   }
   html+=renderQuickCoverageModal();
+  html+=renderStaffPodMoveModal();
   html+=renderQuickMoveModal();
   html+='</div>';
   return html;
