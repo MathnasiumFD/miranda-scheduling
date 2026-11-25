@@ -7415,9 +7415,14 @@ function renderLiveOccupancyBoard(dayKey){
       return '<div class="cal-head"'+headAttrs+'>'+g.label+' <span class="badge '+(occupancy>=cap?'full':'available')+'" style="margin-left:4px">'+occupancy+'/'+cap+'</span>'
         // Name grey; the times on one line, blue on a light blue background (Oct 2026, per Allie).
         // The name itself (live view only) moves that staff member to another Pod for today (Nov 2026).
-        +(instr? '<br>'+(live
-            ? '<a href="#" class="small" style="color:var(--muted);text-decoration:underline dotted" onclick="event.stopPropagation();openStaffPodMoveForm(\''+instr.id+'\',\''+g.podId+'\');return false;" title="Move '+escapeHtml(instr.name)+' to another Pod, today only">'+instr.name+'</a>'
-            : '<span class="small muted">'+instr.name+'</span>')
+        // Kept on one line (Nov 2026, per Allie: "change the font size for magic to be slightly smaller
+        // so she fits in one line" — "Magic (Soupida H)"): a longer name gets a slightly smaller size.
+        +(instr? '<br>'+(function(){
+            const fit='white-space:nowrap;'+(instr.name.length>14? 'font-size:.62rem;' : '');
+            return live
+              ? '<a href="#" class="small" style="'+fit+'color:var(--muted);text-decoration:underline dotted" onclick="event.stopPropagation();openStaffPodMoveForm(\''+instr.id+'\',\''+g.podId+'\');return false;" title="Move '+escapeHtml(instr.name)+' to another Pod, today only">'+instr.name+'</a>'
+              : '<span class="small muted" style="'+fit+'">'+instr.name+'</span>';
+          })()
           +'<br><span class="small" style="white-space:nowrap;color:var(--online);background:var(--online-bg);padding:1px 6px;border-radius:6px;display:inline-block;margin-top:2px">'+instr.from+'–'+instr.until+'</span>' : '')
       +'</div>';
     }).join('');
