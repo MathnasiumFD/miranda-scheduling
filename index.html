@@ -1396,7 +1396,7 @@ function openTermBreakBookingForm(studentId){
   if(!tb){ toast('No summer hours period is available to book right now.'); render(); return; }
   const student=findStudent(studentId);
   if(!staff && studentTermBreakRemaining(tb, studentId)<=0){ toast('No summer session credits left for '+student.name+' this period.'); render(); return; }
-  state.termBreakBookingForm={studentId:studentId, termBreakId:tb.id, date:toKey(tb.startDate)<toKey(now)? toKey(now) : toKey(tb.startDate), start:null, duration:student.duration, error:''};
+  state.termBreakBookingForm={studentId:studentId, termBreakId:tb.id, date:toKey(tb.startDate)<firstSummerChangeDateKey()? firstSummerChangeDateKey() : toKey(tb.startDate), /* 4pm-day-before cutoff (Nov 2026) */ start:null, duration:student.duration, error:''};
   // Land on the first real weekday >= the default date, same idea as the rest of the app's date pickers.
   while(WEEKDAY_KEYS.indexOf(WEEKDAY_KEYS[(new Date(state.termBreakBookingForm.date).getDay()+6)%7])===-1 || isClosedDate(new Date(state.termBreakBookingForm.date))){
     state.termBreakBookingForm.date=toKey(addDays(new Date(state.termBreakBookingForm.date),1));
@@ -1420,6 +1420,7 @@ function confirmTermBreakBooking(){
   if(!staff && !tb.visibleToParents){ f.error='This summer hours period isn\'t available for booking right now.'; render(); return; }
   if(!staff && studentTermBreakRemaining(tb, f.studentId)<=0){ f.error='No summer session credits left for this period.'; render(); return; }
   if(!f.date || f.start==null){ f.error='Choose a date and a time.'; render(); return; }
+  if(!summerChangeOpen(f.date)){ f.error='Bookings for '+fmtShort(new Date(f.date))+' closed at 4pm the day before. Please choose a later date or contact the centre.'; render(); return; }
   const dateKey=f.date;
   if(dateKey<toKey(tb.startDate) || dateKey>toKey(tb.endDate)){ f.error='Pick a date within the summer hours period ('+fmtShort(tb.startDate)+'–'+fmtShort(tb.endDate)+').'; render(); return; }
   const date=new Date(dateKey);
@@ -1450,6 +1451,8 @@ function parentCancelTermBreakSession(sessionId){
   const sess=findSession(sessionId);
   if(!sess || sess.status!=='scheduled' || !sess.termBreak) return;
   const student=findStudent(sess.studentId);
+  // 4pm-day-before cutoff (Nov 2026).
+  if(!summerChangeOpen(toKey(sess.date))){ toast('Changes to '+fmtShort(sess.date)+' closed at 4pm the day before. Please contact the centre.', 6000); render(); return; }
   const pastCutoff = toKey(sess.date)===toKey(simNow()) && sameDayMakeUpCutoffPassed();
   const issued=sess.date, expiry=addMonths(issued,3);
   if(!confirm('Cancel '+student.name+'\'s summer session on '+fmtLong(sess.date)+' at '+minToLabel(sess.start)+'?\n\n'
@@ -1578,6 +1581,23 @@ function chooseParentLandingTab(){
   const ids=parentStudentIdsFor(currentUser.parentId);
   if(ids.some(function(sid){ const s=findStudent(sid); return s && parentCanManage(sid) && studentNeedsSummerDays(s, tb); })) state.parentTab='summer';
 }
+// Summer change cutoff (Nov 2026, per Allie: "for summer schedules, the cut off time for changes is
+// 4pm the day before"). A parent can book, cancel or remove a summer session for a date only until
+// 4pm the day before it. Front desk isn't held to it.
+var SUMMER_CHANGE_CUTOFF=16*60;
+function summerChangeOpen(dateKey){
+  if(actingAsFrontDesk()) return true;
+  const todayKey=toKey(simNow()), dayBefore=toKey(addDays(new Date(dateKey),-1));
+  if(todayKey<dayBefore) return true;
+  return todayKey===dayBefore && nowMinutesOfDay()<SUMMER_CHANGE_CUTOFF;
+}
+// The first date a parent can still change: tomorrow before 4pm today, otherwise the day after.
+function firstSummerChangeDateKey(){
+  const today=new Date(toKey(simNow()));
+  if(actingAsFrontDesk()) return toKey(today);
+  return toKey(addDays(today, nowMinutesOfDay()<SUMMER_CHANGE_CUTOFF? 1 : 2));
+}
+var SUMMER_CUTOFF_NOTE='Summer changes close at 4pm the day before.';
 // Front desk cancelling one summer session: no make-up credit, and it frees the summer allowance
 // back up (same as any front-desk cancellation — see studentTermBreakUsed).
 function staffCancelTermBreakSession(sessionId){
@@ -1631,7 +1651,8 @@ function confirmTermBreakRecurringBooking(){
   // is later) through its end — generated all at once since a term break is short and fully known up
   // front, unlike the rolling HORIZON_WEEKS the regular standing schedule uses.
   const now=simNow();
-  let d=new Date(toKey(tb.startDate)<toKey(now)? toKey(now) : toKey(tb.startDate));
+  const firstOpen=firstSummerChangeDateKey(); // 4pm-day-before cutoff (Nov 2026): parents start from the first date still open
+  let d=new Date(toKey(tb.startDate)<firstOpen? firstOpen : toKey(tb.startDate));
   while(WEEKDAY_KEYS[(d.getDay()+6)%7]!==f.weekday){
     d=addDays(d,1);
     if(toKey(d)>toKey(tb.endDate)){ f.error='No more '+f.weekday+'s left in this summer hours period.'; render(); return; }
@@ -1673,16 +1694,18 @@ function confirmTermBreakRecurringBooking(){
 function removeTermBreakRecurringPick(studentId, weekday, start){
   const student=findStudent(studentId);
   if(!confirm('Remove '+student.name+'\'s recurring '+weekday+' '+minToLabel(start)+' summer sessions? Any already booked for future weeks will be cancelled (no make-up credit — this frees the summer credits back up to rebook a different day/time).')) return;
-  let cancelled=0;
+  let cancelled=0, kept=0;
   sessions.forEach(function(s){
     if(s.studentId!==studentId || !s.termBreak || !s.recurring || s.status!=='scheduled') return;
     const wd=WEEKDAY_KEYS[(s.date.getDay()+6)%7];
     if(wd!==weekday || s.start!==start) return;
+    if(!summerChangeOpen(toKey(s.date))){ kept++; return; } // past the 4pm-day-before cutoff (Nov 2026): stays booked
     s.status='cancelled';
     cancelled++;
     dbWrite('removing a recurring summer-hours session', function(){ return supabaseClient.from('sessions').update({status:'cancelled'}).eq('id', s.id); });
   });
-  toast(cancelled>0? 'Removed — '+cancelled+' upcoming session'+(cancelled===1?'':'s')+' freed back up.' : 'Nothing upcoming to remove for that day/time.');
+  toast((cancelled>0? 'Removed — '+cancelled+' upcoming session'+(cancelled===1?'':'s')+' freed back up.' : 'Nothing upcoming to remove for that day/time.')
+    +(kept? ' '+kept+' session'+(kept===1?' is':'s are')+' too close to change (after 4pm the day before) and stay'+(kept===1?'s':'')+' booked.' : ''), kept? 7000 : undefined);
   render();
 }
 
@@ -11966,7 +11989,9 @@ function renderParent(){
           +'</div>'
           +typeBadge
           +(canManage && !s.termBreak && !s.extraMin && topUpCreditFor(s.studentId, s.date)? '<button class="btn sm" onclick="addTopUp(\''+s.id+'\')" title="Add 30 minutes to the end of this session, using make-up time">+30 min</button>' : '')
-          +(canManage? '<button class="btn sm ghost" onclick="'+(s.termBreak? 'parentCancelTermBreakSession' : 'parentCancelSession')+'(\''+s.id+'\')">Cancel</button>' : '')
+          +(!canManage? '' : (s.termBreak && !summerChangeOpen(toKey(s.date)))
+            ? '<span class="small muted" title="'+SUMMER_CUTOFF_NOTE+' Contact the centre to change it.">Locked</span>' // 4pm-day-before cutoff (Nov 2026)
+            : '<button class="btn sm ghost" onclick="'+(s.termBreak? 'parentCancelTermBreakSession' : 'parentCancelSession')+'(\''+s.id+'\')">Cancel</button>')
         +'</div>';
       }).join('')+'</div>';
     }
@@ -12028,7 +12053,8 @@ function renderParentSummerTab(parent){
   const tb=activeOrUpcomingTermBreak;
   let html='<div class="card"><h2>Summer Schedule</h2>'
     +'<p>'+tb.label+', '+fmtShort(tb.startDate)+'–'+fmtShort(tb.endDate)+' — the centre runs '+minToLabel(tb.morningStart)+'–'+minToLabel(tb.morningEnd)+' during this period, in place of the usual regular schedule.</p>'
-    +'<p>Set up one recurring weekly time (it books every matching week at once) and/or book individual sessions one at a time — whichever suits you, both use the same summer session tally below.</p></div>';
+    +'<p>Set up one recurring weekly time (it books every matching week at once) and/or book individual sessions one at a time — whichever suits you, both use the same summer session tally below.</p>'
+    +'<p><b>'+SUMMER_CUTOFF_NOTE+'</b> After that, please contact the centre.</p></div>'; // Nov 2026
 
   parent.studentIds.forEach(function(sid){
     const student=findStudent(sid);
@@ -12069,7 +12095,9 @@ function renderParentSummerTab(parent){
         return '<div class="session-row">'
           +'<div class="session-date-chip"><div class="sd-day">'+s.date.toLocaleDateString('en-AU',{weekday:'short'})+'</div><div class="sd-num">'+s.date.getDate()+'</div></div>'
           +'<div class="session-main"><b>'+rangeLabel(s.start,s.duration)+'</b><div class="small muted">'+(pod?pod.name:'—')+' · '+(instr?instr.name:'Unassigned')+(s.recurring?' · recurring':'')+'</div></div>'
-          +(parentCanManage(s.studentId)? '<button class="btn sm ghost" onclick="parentCancelTermBreakSession(\''+s.id+'\')">Cancel</button>' : '')
+          +(!parentCanManage(s.studentId)? '' : !summerChangeOpen(toKey(s.date))
+            ? '<span class="small muted" title="'+SUMMER_CUTOFF_NOTE+' Contact the centre to change it.">Locked</span>' // 4pm-day-before cutoff (Nov 2026)
+            : '<button class="btn sm ghost" onclick="parentCancelTermBreakSession(\''+s.id+'\')">Cancel</button>')
         +'</div>';
       }).join('')+'</div>';
     }
@@ -12097,7 +12125,8 @@ function renderTermBreakRecurringModal(){
   // even this weekday. confirmTermBreakRecurringBooking() below still separately checks each actual
   // week when it books, so this is only ever a preview.
   const now=simNow();
-  let previewDate=new Date(toKey(tb.startDate)<toKey(now)? toKey(now) : toKey(tb.startDate));
+  const firstOpen=firstSummerChangeDateKey(); // 4pm-day-before cutoff (Nov 2026)
+  let previewDate=new Date(toKey(tb.startDate)<firstOpen? firstOpen : toKey(tb.startDate));
   while(WEEKDAY_KEYS[(previewDate.getDay()+6)%7]!==f.weekday && toKey(previewDate)<=toKey(tb.endDate)){ previewDate=addDays(previewDate,1); }
   const hasOccurrence=toKey(previewDate)<=toKey(tb.endDate);
   const openStarts=hasOccurrence? starts.filter(function(st){ return termBreakOpenSeatsAt(tb, f.weekday, toKey(previewDate), st, f.duration).seats>0; }) : [];
@@ -12230,7 +12259,8 @@ function renderTermBreakBookingModal(){
   html+='<h3>Book a '+tb.label.toLowerCase()+' session for '+student.name+'</h3>';
   html+='<p>Pick any weekday between '+fmtShort(tb.startDate)+' and '+fmtShort(tb.endDate)+' — the centre runs '+minToLabel(tb.morningStart)+'–'+minToLabel(tb.morningEnd)+' during this period, in place of the usual regular schedule.</p>';
   if(f.error) html+='<div class="banner danger">'+f.error+'</div>';
-  html+='<label>Date</label><input type="date" value="'+f.date+'" min="'+toKey(tb.startDate)+'" max="'+toKey(tb.endDate)+'" onchange="setTermBreakBookingField(\'date\',this.value)"/>';
+  if(!actingAsFrontDesk()) html+='<p class="small muted">'+SUMMER_CUTOFF_NOTE+'</p>'; // Nov 2026
+  html+='<label>Date</label><input type="date" value="'+f.date+'" min="'+(toKey(tb.startDate)<firstSummerChangeDateKey()? firstSummerChangeDateKey() : toKey(tb.startDate))+'" max="'+toKey(tb.endDate)+'" onchange="setTermBreakBookingField(\'date\',this.value)"/>';
   if(f.date){
     const date=new Date(f.date);
     const weekday=WEEKDAY_KEYS[(date.getDay()+6)%7];
