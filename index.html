@@ -1598,6 +1598,52 @@ function firstSummerChangeDateKey(){
   return toKey(addDays(today, nowMinutesOfDay()<SUMMER_CHANGE_CUTOFF? 1 : 2));
 }
 var SUMMER_CUTOFF_NOTE='Summer changes close at 4pm the day before.';
+// Unused summer sessions become make-up credits once summer ends (Nov 2026, per Allie: "make unused
+// ones become makeup credits after summer"). The day after a summer period's last day, each child
+// who needed summer days (see summerSkipReason) and is still enrolled at the end of it gets one
+// make-up credit per summer session they didn't book, valid 3 months like any other. Runs from a
+// front desk login (on sign-in and the 3-minute refresh). Each credit's id is worked out from the
+// summer period, the child and a number, so running it again — or in two tabs at once — never
+// issues the same credit twice. Stored as a 'manual' credit noted "Unused summer session".
+var SUMMER_CREDIT_NOTE='Unused summer session';
+var SUMMER_CREDITS_FROM='2026-12-01'; // summer periods ending before this pre-date the feature
+function stableUuid(text){
+  // Four independent 32-bit FNV-1a style hashes → 128 bits, shaped like a UUID (version 4 layout).
+  const parts=[0x811c9dc5, 0x01000193, 0x9e3779b9, 0x85ebca6b].map(function(seed){
+    let h=seed>>>0;
+    for(let i=0;i<text.length;i++){ h^=text.charCodeAt(i); h=Math.imul(h, 0x01000193)>>>0; h^=h>>>13; }
+    return ('00000000'+(h>>>0).toString(16)).slice(-8);
+  }).join('');
+  return parts.slice(0,8)+'-'+parts.slice(8,12)+'-4'+parts.slice(13,16)+'-'+((parseInt(parts[16],16)&3)|8).toString(16)+parts.slice(17,20)+'-'+parts.slice(20,32);
+}
+function convertUnusedSummerSessions(){
+  if(!actingAsFrontDesk()) return 0;
+  const todayKey=toKey(simNow());
+  let issued=0;
+  termBreaks.forEach(function(tb){
+    const endKey=toKey(tb.endDate);
+    if(endKey<SUMMER_CREDITS_FROM || todayKey<=endKey) return; // only once summer is over
+    const issuedDate=addDays(new Date(endKey),1), expiry=addMonths(issuedDate,3);
+    students.forEach(function(s){
+      if(summerSkipReason(s, tb)) return;
+      if(s.stoppedFrom && toKey(s.stoppedFrom)<=endKey) return;    // left during summer
+      if(studentPlanOn(s.id, tb.endDate).stopped) return;
+      const leftover=studentTermBreakRemaining(tb, s.id);
+      for(let i=0;i<leftover;i++){
+        const id=stableUuid('summer-unused|'+tb.id+'|'+s.id+'|'+i);
+        if(credits.some(function(c){ return c.id===id; })) continue;
+        const c={id:id, studentId:s.id, issuedDate:issuedDate, expiryDate:expiry, status:'available', redeemedSessionId:null, warningSent:false, source:'manual', note:SUMMER_CREDIT_NOTE, minutes:s.duration||null, minutesUsed:0};
+        credits.push(c);
+        issued++;
+        dbWrite('turning an unused summer session into a make-up credit', function(){ return supabaseClient.from('credits').upsert({
+          id:c.id, student_id:c.studentId, issued_date:toKey(c.issuedDate), expiry_date:toKey(c.expiryDate),
+          status:c.status, redeemed_session_id:null, warning_sent:false, source:c.source, note:c.note, minutes:c.minutes
+        }, {onConflict:'id', ignoreDuplicates:true}); });
+      }
+    });
+  });
+  return issued;
+}
 // Front desk cancelling one summer session: no make-up credit, and it frees the summer allowance
 // back up (same as any front-desk cancellation — see studentTermBreakUsed).
 function staffCancelTermBreakSession(sessionId){
@@ -8380,7 +8426,7 @@ function renderSummerAttendancePanel(){
     .map(function(s){ return {s:s, st:summerAttendStatus(s, tb)}; });
   const counts={notset:0, set:0, skip:0};
   rows.forEach(function(r){ counts[r.st.key]++; });
-  html+='<p class="small muted">'+tb.label+', '+fmtShort(tb.startDate)+'–'+fmtShort(tb.endDate)+(tb.visibleToParents? '' : ' · <b>hidden from parents</b> (you can still place students)')+'. Click Manage to change a student\'s summer days. Front desk bookings aren\'t limited by the family\'s summer allowance.</p>';
+  html+='<p class="small muted">'+tb.label+', '+fmtShort(tb.startDate)+'–'+fmtShort(tb.endDate)+(tb.visibleToParents? '' : ' · <b>hidden from parents</b> (you can still place students)')+'. Click Manage to change a student\'s summer days. Front desk bookings aren\'t limited by the family\'s summer allowance. The day after summer ends, each student\'s unbooked summer sessions automatically become make-up credits (valid 3 months, noted "'+SUMMER_CREDIT_NOTE+'").</p>';
   html+='<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">'
     +'<input type="search" placeholder="Search student…" value="'+escapeHtml(flt.q)+'" oninput="setSummerAttendFilter(\'q\',this.value)" style="max-width:220px"/>'
     +[['all','All'],['notset','Not set yet ('+counts.notset+')'],['set','Set ('+counts.set+')'],['skip','Not needed ('+counts.skip+')']].map(function(o){
@@ -12360,7 +12406,7 @@ function renderTermBreakPlanModal(){
   const dates=termBreakPlanDates(tb, f.studentId);
   let html='<div class="overlay" onclick="if(event.target===this) closeTermBreakPlanForm()"><div class="modal" style="max-width:640px">';
   html+='<h3>Book '+student.name+'\'s summer sessions</h3>';
-  html+='<p class="small">Pick a time on every day you\'d like to come, then book them all at once. You don\'t have to use them all now — any you don\'t book stay available to book later.'+(staff? '' : ' '+SUMMER_CUTOFF_NOTE)+'</p>';
+  html+='<p class="small">Pick a time on every day you\'d like to come, then book them all at once. You don\'t have to use them all now — any you don\'t book stay available to book later, and any still unused when summer ends become make-up credits.'+(staff? '' : ' '+SUMMER_CUTOFF_NOTE)+'</p>';
   if(f.error) html+='<div class="banner danger">'+f.error+'</div>';
   // Same time every week, in one go.
   const fillStarts=termBreakPossibleStarts(tb, f.duration);
@@ -13036,6 +13082,7 @@ function afterLogin(){
         chooseParentLandingTab(); // Summer Schedule first if summer days still need setting (Nov 2026)
         applyPromotions();
         applyPlanChanges();
+        convertUnusedSummerSessions(); // unused summer sessions -> make-up credits once summer ends (Nov 2026)
         regenerateAllRecurring();
         autoCheckOutPastClose();
         render();
@@ -13066,7 +13113,7 @@ function afterLogin(){
         if(!liveSyncStarted){
           liveSyncStarted=true;
           setInterval(function(){
-            loadAllData().then(function(){ applyPromotions(); applyPlanChanges(); autoCheckOutPastClose(); return loadLoginStatuses(); }).then(renderUnlessEditing)
+            loadAllData().then(function(){ applyPromotions(); applyPlanChanges(); convertUnusedSummerSessions(); autoCheckOutPastClose(); return loadLoginStatuses(); }).then(renderUnlessEditing)
               .catch(function(err){ console.error('Heartbeat refresh failed', err); });
           }, 180000);
           subscribeToLiveUpdates();
