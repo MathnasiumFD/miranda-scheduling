@@ -1504,7 +1504,7 @@ function studentTermBreakUsed(tb, studentId){
     // A summer session the parent cancelled still counts as used — they get a make-up credit for it
     // instead (Oct 2026); one front desk cancelled (or a closure) frees the allowance back up.
     return s.studentId===studentId && s.termBreak && (s.status!=='cancelled' || s.parentCancelled) && dk>=startKey && dk<=endKey;
-  }).length;
+  }).length + summerHolidayCredits(tb, studentId).length; // public-holiday make-up credits count as used (Nov 2026)
 }
 function studentTermBreakRemaining(tb, studentId){
   return Math.max(0, studentTermBreakCredits(tb, studentId) - studentTermBreakUsed(tb, studentId));
@@ -1606,6 +1606,29 @@ var SUMMER_CUTOFF_NOTE='Summer changes close at 4pm the day before.';
 // summer period, the child and a number, so running it again — or in two tabs at once — never
 // issues the same credit twice. Stored as a 'manual' credit noted "Unused summer session".
 var SUMMER_CREDIT_NOTE='Unused summer session';
+// Public holiday on a weekly summer day (Nov 2026): a 'closure' make-up credit, issued on the holiday's
+// own date and noted "Summer public holiday — <label>". Its id comes from the period, child and date,
+// so the same holiday is never credited twice. These count as used summer sessions.
+var SUMMER_HOLIDAY_NOTE='Summer public holiday';
+function isSummerHolidayCredit(c){ return c && c.source==='closure' && typeof c.note==='string' && c.note.indexOf(SUMMER_HOLIDAY_NOTE)===0; }
+function summerHolidayCredits(tb, studentId){
+  const s=toKey(tb.startDate), e=toKey(tb.endDate);
+  return credits.filter(function(c){ const k=toKey(c.issuedDate); return c.studentId===studentId && isSummerHolidayCredit(c) && k>=s && k<=e; });
+}
+function issueSummerHolidayCredit(tb, student, date, duration){
+  const dk=toKey(date);
+  const id=stableUuid('summer-holiday|'+tb.id+'|'+student.id+'|'+dk);
+  if(credits.some(function(c){ return c.id===id; })) return false;
+  const closure=closedDayFor(date);
+  const issued=new Date(dk), expiry=addMonths(issued,3);
+  const c={id:id, studentId:student.id, issuedDate:issued, expiryDate:expiry, status:'available', redeemedSessionId:null, warningSent:false, source:'closure', note:SUMMER_HOLIDAY_NOTE+(closure&&closure.label? ' — '+closure.label : ''), minutes:duration||student.duration||null, minutesUsed:0};
+  credits.push(c);
+  dbWrite('adding a public-holiday make-up credit', function(){ return supabaseClient.from('credits').upsert({
+    id:c.id, student_id:c.studentId, issued_date:dk, expiry_date:toKey(c.expiryDate),
+    status:c.status, redeemed_session_id:null, warning_sent:false, source:c.source, note:c.note, minutes:c.minutes
+  }, {onConflict:'id', ignoreDuplicates:true}); });
+  return true;
+}
 var SUMMER_CREDITS_FROM='2026-12-01'; // summer periods ending before this pre-date the feature
 function stableUuid(text){
   // Four independent 32-bit FNV-1a style hashes → 128 bits, shaped like a UUID (version 4 layout).
@@ -1703,10 +1726,16 @@ function confirmTermBreakRecurringBooking(){
     d=addDays(d,1);
     if(toKey(d)>toKey(tb.endDate)){ f.error='No more '+f.weekday+'s left in this summer hours period.'; render(); return; }
   }
-  let booked=0, skippedNoRoom=0;
+  let booked=0, skippedNoRoom=0, holidays=0;
   while(toKey(d)<=toKey(tb.endDate)){
     if(remaining<=0) break;
-    if(!isClosedDate(d)){
+    // Public holiday on their weekly day (Nov 2026, per Allie: "if your routine day falls on a public
+    // holiday, you will automatically be awarded a makeup credit"): a make-up credit straight away,
+    // counted against the summer allowance (see summerHolidayCredits) so it isn't credited twice.
+    if(isClosedDate(d)){
+      if(issueSummerHolidayCredit(tb, student, d, f.duration)){ holidays++; remaining--; }
+    }
+    else{
       const dateKey=toKey(d);
       const pick=termBreakPickBestPod(tb, f.weekday, dateKey, f.start, f.duration);
       if(!pick){ skippedNoRoom++; }
@@ -1724,13 +1753,14 @@ function confirmTermBreakRecurringBooking(){
     }
     d=addDays(d,7);
   }
-  if(booked===0){
+  if(booked===0 && holidays===0){
     f.error = skippedNoRoom>0 ? 'That day/time is full every week it\'s offered — try a different time.' : 'Nothing could be booked for that day/time.';
     render(); return;
   }
   let msg='Booked '+booked+' '+f.weekday+' session'+(booked===1?'':'s')+' at '+minToLabel(f.start)+'.';
+  if(holidays>0) msg+=' '+holidays+' '+f.weekday+(holidays===1?' is a public holiday':'s are public holidays')+' — a make-up credit was added for '+(holidays===1?'it':'each')+'.';
   if(skippedNoRoom>0) msg+=' '+skippedNoRoom+' week'+(skippedNoRoom===1?' was':'s were')+' already full.';
-  toast(msg);
+  toast(msg, 7000);
   state.termBreakRecurringForm=null;
   render();
 }
@@ -1749,6 +1779,15 @@ function removeTermBreakRecurringPick(studentId, weekday, start){
     s.status='cancelled';
     cancelled++;
     dbWrite('removing a recurring summer-hours session', function(){ return supabaseClient.from('sessions').update({status:'cancelled'}).eq('id', s.id); });
+  });
+  // The public-holiday make-up credits that weekly time gave (Nov 2026) go too, while still unused
+  // and still changeable — the weekly time they stood in for no longer exists.
+  credits.filter(function(c){
+    return c.studentId===studentId && isSummerHolidayCredit(c) && c.status==='available' && !(c.minutesUsed>0)
+      && WEEKDAY_KEYS[(c.issuedDate.getDay()+6)%7]===weekday && summerChangeOpen(toKey(c.issuedDate));
+  }).forEach(function(c){
+    credits=credits.filter(function(x){ return x.id!==c.id; });
+    dbWrite('removing a public-holiday make-up credit', function(){ return supabaseClient.from('credits').delete().eq('id', c.id); });
   });
   toast((cancelled>0? 'Removed — '+cancelled+' upcoming session'+(cancelled===1?'':'s')+' freed back up.' : 'Nothing upcoming to remove for that day/time.')
     +(kept? ' '+kept+' session'+(kept===1?' is':'s are')+' too close to change (after 4pm the day before) and stay'+(kept===1?'s':'')+' booked.' : ''), kept? 7000 : undefined);
@@ -12102,16 +12141,25 @@ function renderParentSummerTab(parent){
   const tb=activeOrUpcomingTermBreak;
   // Wording per Allie (Nov 2026). Dates and hours come from the summer period itself.
   const longDate=function(d){ return d.toLocaleDateString('en-AU',{weekday:'long', day:'numeric', month:'long'}).replace(',', ''); };
-  let html='<div class="card"><h2>Summer Schedule</h2>'
-    +'<p>From '+longDate(tb.startDate)+' to '+longDate(tb.endDate)+' (inclusive), our centre will operate from '+minToLabel(tb.morningStart)+'–'+minToLabel(tb.morningEnd)+' in place of our regular opening hours.</p>'
-    +'<p>To accommodate your family\'s holiday plans, we offer two flexible booking options:</p>'
-    +'<ul style="margin:0 0 12px 18px;padding:0">'
-      +'<li><b>Book a single session:</b> Ideal for families whose availability varies from week to week. Select individual dates and times to fit around holidays, family commitments, playdates and other activities.</li>'
-      +'<li><b>Add a recurring time:</b> Ideal for families who prefer a consistent weekly routine. Select your preferred day and time to automatically schedule the same session each week throughout the summer period.</li>'
+  // Laid out uniformly (Nov 2026, per Allie: "can you do the whole thing more uniform"): every part of
+  // the page uses the same section heading, body text size and spacing; the two booking options are
+  // matching boxes named exactly like the buttons on each child's card below.
+  // Laid out to Allie's mock-up (Nov 2026): one plain, even document — every paragraph the same size,
+  // colour and spacing, bold lead-ins on the two options, a bold plain sub-heading, key facts in bold.
+  const P=function(inner){ return '<p style="margin:0 0 12px;color:var(--text);font-size:.9rem;line-height:1.5">'+inner+'</p>'; };
+  const LI=function(inner){ return '<li style="margin:0 0 10px;color:var(--text);font-size:.9rem;line-height:1.5">'+inner+'</li>'; };
+  let html='<div class="card"><h2 style="margin-bottom:14px">Summer Schedule</h2>'
+    +P('From '+longDate(tb.startDate)+' to '+longDate(tb.endDate)+' (inclusive), our centre will operate from <b>'+minToLabel(tb.morningStart)+'–'+minToLabel(tb.morningEnd)+'</b> in place of our regular opening hours.')
+    +P('To accommodate your family\'s holiday plans, we offer two flexible booking options:')
+    +'<ul style="margin:0 0 12px;padding-left:40px">'
+      +LI('<b>Book a single session:</b> Ideal for families whose availability varies from week to week. Select individual dates and times to fit around holidays, family commitments, playdates and other activities.')
+      +LI('<b>Add a recurring time:</b> Ideal for families who prefer a consistent weekly routine. Select your preferred day and time to automatically schedule the same session each week throughout the summer period.')
     +'</ul>'
-    +'<h3 style="margin:14px 0 6px">Changes, Absences &amp; Makeup Sessions</h3>'
-    +'<p>We understand that plans can change, especially during the school holidays! You are welcome to amend your booked sessions as needed. However, all booking changes, notifications of non-attendance and makeup session requests must be made by <b>4pm the day prior</b> to your scheduled session.</p>'
-    +'<p>Your child\'s total summer session allowance, remaining available sessions and upcoming bookings are displayed below.</p></div>';
+    +'<div style="margin:0 0 12px;color:var(--text);font-size:.9rem;font-weight:700">Changes, Absences &amp; Makeup Sessions</div>'
+    +P('We understand that plans can change, especially during the school holidays! You are welcome to amend your booked sessions as needed. However, all booking changes, notifications of non-attendance and makeup session requests must be made <b>by 4pm the day prior to your scheduled session.</b>')
+    +P('If your routine day falls on a public holiday, you will automatically be awarded a makeup credit.')
+    +P('Your child\'s total summer session allowance, remaining available sessions and upcoming bookings are displayed below.').replace('margin:0 0 12px','margin:0')
+  +'</div>';
 
   parent.studentIds.forEach(function(sid){
     const student=findStudent(sid);
@@ -12130,16 +12178,29 @@ function renderParentSummerTab(parent){
       +'<div><div class="small muted">Used so far</div><b>'+used+' of '+total+'</b></div>'
       +'<div style="margin-left:auto;display:flex;gap:8px">'
         +(!parentCanManage(sid)? '<span class="small muted">View only — contact the centre to book</span>'
-        : '<button class="btn sm'+(remaining<=0?' ghost':' primary')+'" '+(remaining<=0?'disabled':'')+' onclick="openTermBreakPlanForm(\''+sid+'\')">Book a single session</button>' // opens the planner: one day or many at once (Nov 2026)
-        +'<button class="btn sm ghost" '+((remaining<=0||atRecurringCap)?'disabled':'')+' onclick="openTermBreakRecurringForm(\''+sid+'\')">+ Add a recurring time</button>')
+        // Same size and style for both, named exactly as in the Booking options above (Nov 2026).
+        : '<button class="btn sm primary" '+(remaining<=0?'disabled':'')+' onclick="openTermBreakPlanForm(\''+sid+'\')">Book a single session</button>' // opens the planner: one day or many at once (Nov 2026)
+        +'<button class="btn sm primary" '+((remaining<=0||atRecurringCap)?'disabled':'')+' onclick="openTermBreakRecurringForm(\''+sid+'\')">Add a recurring time</button>')
       +'</div></div>';
-    if(remaining<=0){ html+='<p class="small muted">No summer session credits left for '+student.name+' this period.</p>'; }
+    if(remaining<=0){ html+='<p class="small muted">No summer sessions left to book for '+student.name+' this period.</p>'; }
 
     if(picks.length>0){
-      html+='<div class="section-label">Recurring summer times</div>';
+      html+='<div class="section-label">Recurring times</div>';
       html+='<div class="session-list">'+picks.map(function(p){
         return '<div class="session-row"><div class="session-main"><b>Every '+p.weekday+' '+minToLabel(p.start)+'</b></div>'
           +'<button class="btn sm ghost" onclick="removeTermBreakRecurringPick(\''+sid+'\',\''+p.weekday+'\','+p.start+')">Remove</button></div>';
+      }).join('')+'</div>';
+    }
+
+    // Public holidays on their recurring day, each already turned into a makeup credit (Nov 2026).
+    const hols=summerHolidayCredits(tb, sid).slice().sort(function(a,b){ return toKey(a.issuedDate).localeCompare(toKey(b.issuedDate)); });
+    if(hols.length){
+      html+='<div class="section-label">Public holidays</div>';
+      html+='<div class="session-list">'+hols.map(function(c){
+        const label=(c.note||'').replace(SUMMER_HOLIDAY_NOTE+' — ','').replace(SUMMER_HOLIDAY_NOTE,'') || 'Public holiday';
+        return '<div class="session-row">'
+          +'<div class="session-date-chip"><div class="sd-day">'+c.issuedDate.toLocaleDateString('en-AU',{weekday:'short'})+'</div><div class="sd-num">'+c.issuedDate.getDate()+'</div></div>'
+          +'<div class="session-main"><b>'+escapeHtml(label)+'</b><div class="small muted">Makeup credit added · valid until '+fmtShort(c.expiryDate)+'</div></div></div>';
       }).join('')+'</div>';
     }
 
