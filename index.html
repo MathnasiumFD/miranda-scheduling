@@ -2032,6 +2032,7 @@ var state={
   summerAttendFilter:{q:'', show:'all'},
   summerShiftWeek:0, summerShiftForm:null, // summer shift times (Nov 2026)
   termBreakPlanForm:null, // book many summer sessions at once (Nov 2026)
+  termBreakEditForm:null, // Edit time on a booked summer session (Nov 2026)
   quickMoveForm:null,
   parentBookingCreditId:null,
   newStudentForm:null,
@@ -8659,7 +8660,8 @@ function renderSummerAttendModal(){
   html+=upcoming.length? '<div class="session-list">'+upcoming.map(function(s){
       const pod=findPod(s.podId);
       return '<div class="session-row"><div class="session-main"><b>'+fmtShort(s.date)+' · '+rangeLabel(s.start,s.duration)+'</b><div class="small muted">'+(pod?pod.name:'—')+(s.recurring?' · weekly':' · single day')+'</div></div>'
-        +'<button class="btn sm ghost" onclick="staffCancelTermBreakSession(\''+s.id+'\')">Cancel</button></div>';
+        +'<div style="display:flex;gap:6px"><button class="btn sm ghost" onclick="openTermBreakEditForm(\''+s.id+'\')">Edit time</button>' // Nov 2026
+        +'<button class="btn sm ghost" onclick="staffCancelTermBreakSession(\''+s.id+'\')">Cancel</button></div></div>';
     }).join('')+'</div>' : '<div class="empty-note">Nothing booked.</div>';
   html+='<div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn ghost" onclick="closeSummerAttendForm()">Done</button></div>';
   html+='</div></div>';
@@ -8827,6 +8829,7 @@ function renderStaff(){
     html+=renderTermBreakRecurringModal();
     html+=renderTermBreakBookingModal();
     html+=renderTermBreakPlanModal();
+    html+=renderTermBreakEditModal(); // Edit time (Nov 2026)
   }
 
   // Modals always render regardless of which tab is active — every one of these is only ever
@@ -11970,7 +11973,7 @@ function renderParent(){
   if(!parent) return '<div class="card"><p class="small muted">Your login isn\'t linked to a parent record — ask front desk to check your account.</p></div>';
   const tab=PARENT_TABS.some(function(t){ return t.id===state.parentTab; })? state.parentTab : 'home';
   let html=parentAnnouncementsHtml(parent)+renderParentTabsBar(tab);
-  if(tab==='summer'){ html+=renderParentSummerTab(parent); html+=renderTermBreakBookingModal(); html+=renderTermBreakRecurringModal(); html+=renderTermBreakPlanModal(); return html; }
+  if(tab==='summer'){ html+=renderParentSummerTab(parent); html+=renderTermBreakBookingModal(); html+=renderTermBreakRecurringModal(); html+=renderTermBreakPlanModal(); html+=renderTermBreakEditModal(); return html; }
 
   html+='<div class="card"><div class="card-head"><h2>Welcome, '+parent.name+'</h2><button class="btn sm ghost" onclick="'+(supabaseClient?'logOut()':'parentLogout()')+'">Log out</button></div>'
     +'<p>This is your MATHQ hub for your child’s sessions — see what’s upcoming, request a permanent day/time change, cancel a session, or book a make-up using our live availability calendar.</p>'
@@ -12079,7 +12082,8 @@ function renderParent(){
           +(canManage && !s.termBreak && !s.extraMin && topUpCreditFor(s.studentId, s.date)? '<button class="btn sm" onclick="addTopUp(\''+s.id+'\')" title="Add 30 minutes to the end of this session, using make-up time">+30 min</button>' : '')
           +(!canManage? '' : (s.termBreak && !summerChangeOpen(toKey(s.date)))
             ? '<span class="small muted" title="'+SUMMER_CUTOFF_NOTE+' Contact the centre to change it.">Locked</span>' // 4pm-day-before cutoff (Nov 2026)
-            : '<button class="btn sm ghost" onclick="'+(s.termBreak? 'parentCancelTermBreakSession' : 'parentCancelSession')+'(\''+s.id+'\')">Cancel</button>')
+            : (s.termBreak? '<button class="btn sm ghost" onclick="openTermBreakEditForm(\''+s.id+'\')">Edit time</button> ' : '') // Nov 2026
+              +'<button class="btn sm ghost" onclick="'+(s.termBreak? 'parentCancelTermBreakSession' : 'parentCancelSession')+'(\''+s.id+'\')">Cancel</button>')
         +'</div>';
       }).join('')+'</div>';
     }
@@ -12124,6 +12128,7 @@ function renderParent(){
   html+=renderTimeChangeRequestModal();
   html+=renderCancelRequestModal();
   html+=renderParentWaitlistModal();
+  html+=renderTermBreakEditModal(); // Edit time on a summer session in My Schedule (Nov 2026)
   return html;
 }
 // Sept 2026, per Allie: a dedicated Summer Schedule tab in the parent view — shows "Coming soon"
@@ -12215,7 +12220,8 @@ function renderParentSummerTab(parent){
           +'<div class="session-main"><b>'+rangeLabel(s.start,s.duration)+'</b><div class="small muted">'+(pod?pod.name:'—')+' · '+(instr?instr.name:'Unassigned')+(s.recurring?' · recurring':'')+'</div></div>'
           +(!parentCanManage(s.studentId)? '' : !summerChangeOpen(toKey(s.date))
             ? '<span class="small muted" title="'+SUMMER_CUTOFF_NOTE+' Contact the centre to change it.">Locked</span>' // 4pm-day-before cutoff (Nov 2026)
-            : '<button class="btn sm ghost" onclick="parentCancelTermBreakSession(\''+s.id+'\')">Cancel</button>')
+            : '<button class="btn sm ghost" onclick="openTermBreakEditForm(\''+s.id+'\')">Edit time</button> ' // Nov 2026
+              +'<button class="btn sm ghost" onclick="parentCancelTermBreakSession(\''+s.id+'\')">Cancel</button>')
         +'</div>';
       }).join('')+'</div>';
     }
@@ -12500,6 +12506,94 @@ function renderTermBreakPlanModal(){
   html+='<div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">'
     +'<button class="btn ghost" onclick="closeTermBreakPlanForm()">Cancel</button>'
     +'<button class="btn primary" '+((!picked||over)?'disabled':'')+' onclick="confirmTermBreakPlan()">Book '+(picked||'')+' session'+(picked===1?'':'s')+'</button>'
+  +'</div>';
+  html+='</div></div>';
+  return html;
+}
+// "Edit time" on a booked summer session (Nov 2026, per Allie: "can there also be an 'edit time'
+// button next to booked sessions?"). Same day, a different open time. For a weekly time, the parent
+// chooses "just this day" or "this and every later <weekday>". Follows the 4pm-day-before cutoff
+// (front desk isn't held to it). A single day changed out of a weekly time becomes a one-off, so the
+// weekly time itself is unchanged and "Remove" on it leaves that day alone.
+function withoutSession(sess, fn){
+  const was=sess.status; sess.status='cancelled';
+  try{ return fn(); } finally { sess.status=was; }
+}
+function openTermBreakEditForm(sessionId){
+  const sess=findSession(sessionId);
+  if(!sess || !sess.termBreak || sess.status!=='scheduled') return;
+  if(!summerChangeOpen(toKey(sess.date))){ toast('Changes to '+fmtShort(sess.date)+' closed at 4pm the day before. Please contact the centre.', 6000); return; }
+  state.termBreakEditForm={sessionId:sessionId, start:null, scope:'day', error:''};
+  render();
+}
+function closeTermBreakEditForm(){ state.termBreakEditForm=null; render(); }
+function setTermBreakEditField(field, value){
+  const f=state.termBreakEditForm; if(!f) return;
+  f[field]=(field==='start')? (value===''? null : Number(value)) : value;
+  f.error='';
+  render();
+}
+// The sessions an edit applies to: this one, or (weekly, "every week") this one plus every later
+// still-changeable session of the same weekly time.
+function termBreakEditTargets(sess, scope){
+  if(scope!=='weekly' || !sess.recurring) return [sess];
+  const wd=WEEKDAY_KEYS[(sess.date.getDay()+6)%7];
+  return sessions.filter(function(s){
+    return s.studentId===sess.studentId && s.termBreak && s.recurring && s.status==='scheduled' && s.start===sess.start
+      && WEEKDAY_KEYS[(s.date.getDay()+6)%7]===wd && toKey(s.date)>=toKey(sess.date) && summerChangeOpen(toKey(s.date));
+  }).sort(function(a,b){ return toKey(a.date).localeCompare(toKey(b.date)); });
+}
+function confirmTermBreakEdit(){
+  const f=state.termBreakEditForm; if(!f) return;
+  const sess=findSession(f.sessionId);
+  const tb=sess && termBreakOn(sess.date);
+  if(!sess || !tb){ f.error='That session can no longer be changed.'; render(); return; }
+  if(f.start==null){ f.error='Select a time.'; render(); return; }
+  if(f.start===sess.start){ f.error='That\'s already the booked time.'; render(); return; }
+  const targets=termBreakEditTargets(sess, f.scope);
+  const moved=[], full=[];
+  targets.forEach(function(s){
+    const dk=toKey(s.date), wd=WEEKDAY_KEYS[(s.date.getDay()+6)%7];
+    const pick=withoutSession(s, function(){ return termBreakPickBestPod(tb, wd, dk, f.start, s.duration); });
+    if(!pick){ full.push(dk); return; }
+    s.start=f.start; s.podId=pick.podId; s.instructorId=pick.instructorId;
+    if(f.scope!=='weekly') s.recurring=false; // a one-day change is a one-off now
+    const upd={start_min:s.start, pod_id:s.podId, instructor_id:s.instructorId, is_recurring:!!s.recurring};
+    dbWrite('changing a summer session\'s time', function(){ return supabaseClient.from('sessions').update(upd).eq('id', s.id); });
+    moved.push(dk);
+  });
+  if(!moved.length){ f.error='That time is full'+(targets.length>1? ' on every one of those days' : '')+' — please choose another.'; render(); return; }
+  toast((moved.length===1? fmtShort(new Date(moved[0]))+' is now ' : moved.length+' sessions are now ')+minToLabel(f.start)+'.'
+    +(full.length? ' '+full.length+' day'+(full.length===1?' was':'s were')+' full at that time and kept the old time.' : ''), 6000);
+  state.termBreakEditForm=null;
+  render();
+}
+function renderTermBreakEditModal(){
+  const f=state.termBreakEditForm;
+  if(!f) return '';
+  const sess=findSession(f.sessionId);
+  const tb=sess && termBreakOn(sess.date);
+  if(!sess || !tb) return '';
+  const student=findStudent(sess.studentId);
+  const dk=toKey(sess.date), wd=WEEKDAY_KEYS[(sess.date.getDay()+6)%7];
+  const opens=withoutSession(sess, function(){ return termBreakPlanOpenStarts(tb, wd, dk, sess.duration); }).filter(function(st){ return st!==sess.start; });
+  const later=sess.recurring? termBreakEditTargets(sess, 'weekly').length-1 : 0;
+  let html='<div class="overlay" onclick="if(event.target===this) closeTermBreakEditForm()"><div class="modal">';
+  html+='<h3>Edit time — '+student.name+'</h3>';
+  html+='<p class="small">'+fmtLong(sess.date)+' · currently '+rangeLabel(sess.start, sess.duration)+(actingAsFrontDesk()? '' : '<br>'+SUMMER_CUTOFF_NOTE)+'</p>';
+  if(f.error) html+='<div class="banner danger">'+f.error+'</div>';
+  if(!opens.length){ html+='<p class="small muted">No other times are open that day.</p>'; }
+  else{
+    html+='<label>New time</label><select onchange="setTermBreakEditField(\'start\',this.value)"><option value="">Select time</option>'
+      +opens.map(function(st){ return '<option value="'+st+'"'+(st===f.start?' selected':'')+'>'+minToLabel(st)+'</option>'; }).join('')+'</select>';
+    if(later>0){
+      html+='<div style="margin-top:8px"><label style="font-weight:400;display:block"><input type="radio" name="tbEditScope" '+(f.scope!=='weekly'?'checked':'')+' onchange="setTermBreakEditField(\'scope\',\'day\')"/> Just this day</label>'
+        +'<label style="font-weight:400;display:block"><input type="radio" name="tbEditScope" '+(f.scope==='weekly'?'checked':'')+' onchange="setTermBreakEditField(\'scope\',\'weekly\')"/> This day and every later '+wd+' ('+(later+1)+' sessions)</label></div>';
+    }
+  }
+  html+='<div style="display:flex;gap:8px;margin-top:14px;justify-content:flex-end">'
+    +'<button class="btn ghost" onclick="closeTermBreakEditForm()">Cancel</button>'
+    +'<button class="btn primary" '+(f.start==null?'disabled':'')+' onclick="confirmTermBreakEdit()">Save new time</button>'
   +'</div>';
   html+='</div></div>';
   return html;
