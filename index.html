@@ -1031,6 +1031,60 @@ function termBreakOn(date){
 function termBreakCoverageFor(termBreak, podId, weekday){
   return (termBreak && termBreak.coverage && termBreak.coverage[podId] && termBreak.coverage[podId][weekday]) || null;
 }
+// ---------- Summer shift times (Nov 2026, per Allie: "I want the option to set and adjust staff
+// start and end times for actual shifts, but this will only happen after most of the students have
+// been placed") ----------
+// A summer shift used to always be the whole opening hours (morningStart–morningEnd). Now each
+// Pod/weekday can have its own usual times (t.coverageTimes[podId][weekday], from
+// term_break_coverage.start_min/end_min), and any single date can be set on its own
+// (t.shiftDays, from term_break_shift_days), which wins. Who works it is unchanged (t.coverage).
+// Bookings aren't limited by these times — they're the staff's hours, set once students are placed.
+function termBreakShiftOn(tb, podId, date){
+  const weekday=WEEKDAY_KEYS[(date.getDay()+6)%7];
+  const instructorId=termBreakCoverageFor(tb, podId, weekday);
+  if(!instructorId) return null;
+  const dk=toKey(date);
+  const day=(tb.shiftDays||[]).find(function(d){ return d.podId===podId && d.dateKey===dk; });
+  if(day) return {instructorId:instructorId, start:day.start, end:day.end, source:'day'};
+  const wk=tb.coverageTimes && tb.coverageTimes[podId] && tb.coverageTimes[podId][weekday];
+  if(wk) return {instructorId:instructorId, start:wk.start, end:wk.end, source:'weekly'};
+  return {instructorId:instructorId, start:tb.morningStart, end:tb.morningEnd, source:'default'};
+}
+// Placed students in a Pod on a summer date: how many, and the earliest arrival to the latest finish.
+function termBreakBookedSpan(podId, dateKey){
+  const list=sessions.filter(function(s){ return s.termBreak && s.podId===podId && s.status!=='cancelled' && toKey(s.date)===dateKey; });
+  if(!list.length) return {count:0, start:null, end:null};
+  return {count:list.length,
+    start:Math.min.apply(null, list.map(function(s){ return s.start; })),
+    end:Math.max.apply(null, list.map(function(s){ return s.start+s.duration; }))};
+}
+// Every date in this summer period that falls on the weekday (closed days left out).
+function termBreakDatesForWeekday(tb, weekday){
+  const out=[];
+  for(let d=new Date(toKey(tb.startDate)); toKey(d)<=toKey(tb.endDate); d=addDays(d,1)){
+    if(WEEKDAY_KEYS[(d.getDay()+6)%7]===weekday && !isClosedDate(d)) out.push(new Date(d));
+  }
+  return out;
+}
+function setTermBreakShiftDay(tb, podId, dateKey, start, end){
+  tb.shiftDays=(tb.shiftDays||[]).filter(function(d){ return !(d.podId===podId && d.dateKey===dateKey); });
+  tb.shiftDays.push({podId:podId, dateKey:dateKey, start:start, end:end});
+  dbWrite('setting a summer shift\'s times for one day', function(){ return supabaseClient.from('term_break_shift_days').upsert({
+    term_break_id:tb.id, pod_id:podId, the_date:dateKey, start_min:start, end_min:end
+  }, {onConflict:'term_break_id,pod_id,the_date'}); });
+}
+function clearTermBreakShiftDay(tb, podId, dateKey){
+  tb.shiftDays=(tb.shiftDays||[]).filter(function(d){ return !(d.podId===podId && d.dateKey===dateKey); });
+  dbWrite('resetting a summer shift day to its usual times', function(){ return supabaseClient.from('term_break_shift_days').delete()
+    .eq('term_break_id', tb.id).eq('pod_id', podId).eq('the_date', dateKey); });
+}
+function setTermBreakWeeklyTimes(tb, podId, weekday, start, end){
+  tb.coverageTimes=tb.coverageTimes||{};
+  tb.coverageTimes[podId]=tb.coverageTimes[podId]||{};
+  tb.coverageTimes[podId][weekday]= (start==null)? null : {start:start, end:end};
+  dbWrite('setting a summer shift\'s usual times', function(){ return supabaseClient.from('term_break_coverage').update({start_min:start, end_min:end})
+    .eq('term_break_id', tb.id).eq('pod_id', podId).eq('weekday', weekday); });
+}
 function setTermBreakCoverage(termBreakId, podId, weekday, instructorId){
   const t=termBreaks.find(function(x){ return x.id===termBreakId; });
   if(!t) return;
@@ -1042,6 +1096,7 @@ function setTermBreakCoverage(termBreakId, podId, weekday, instructorId){
       term_break_id:t.id, pod_id:podId, weekday:weekday, instructor_id:instructorId
     }, {onConflict:'term_break_id,pod_id,weekday'}); });
   } else {
+    if(t.coverageTimes && t.coverageTimes[podId]) t.coverageTimes[podId][weekday]=null; // the row (and its usual times) goes
     dbWrite('clearing summer-hours coverage', function(){ return supabaseClient.from('term_break_coverage').delete()
       .eq('term_break_id', t.id).eq('pod_id', podId).eq('weekday', weekday); });
   }
@@ -1867,6 +1922,7 @@ var state={
   staffPodMoveForm:null, // move a staff member to another Pod, today only (Nov 2026)
   summerAttendForm:null, // front desk: one student's summer days (Nov 2026)
   summerAttendFilter:{q:'', show:'all'},
+  summerShiftWeek:0, summerShiftForm:null, // summer shift times (Nov 2026)
   quickMoveForm:null,
   parentBookingCreditId:null,
   newStudentForm:null,
@@ -8325,6 +8381,144 @@ function renderSummerAttendancePanel(){
   +'</table></div>';
   return html+'</div>';
 }
+// Summer shift times, week by week (Nov 2026). One row per Pod, one column per weekday of the chosen
+// summer week: who's on, their times (that day's own, the usual ones, or opening hours), and how many
+// students are placed with the earliest arrival–latest finish, flagged when they fall outside the
+// shift. Click a shift to change its times for that day or every week; "Fit this week to placed
+// students" sets every shift in the week to its booked span in one go.
+function summerWeekMondays(tb){
+  const out=[];
+  for(let m=getMonday(new Date(toKey(tb.startDate))); toKey(m)<=toKey(tb.endDate); m=addDays(m,7)) out.push(m);
+  return out;
+}
+function setSummerShiftWeek(i){ state.summerShiftWeek=i; render(); }
+function renderSummerShiftTimesPanel(){
+  const tb=summerBreakForBooking(true);
+  let html=sectionOpen('summerShiftTimes','Summer shift times');
+  if(!tb) return html+'<div class="empty-note">No current or upcoming summer hours period.</div></div>';
+  const weeks=summerWeekMondays(tb);
+  const wi=Math.min(Math.max(state.summerShiftWeek||0, 0), weeks.length-1);
+  const dates=[0,1,2,3,4].map(function(i){ return addDays(weeks[wi], i); })
+    .filter(function(d){ return toKey(d)>=toKey(tb.startDate) && toKey(d)<=toKey(tb.endDate); });
+  html+='<p class="small muted">Each shift starts as the full opening hours ('+minToLabel(tb.morningStart)+'–'+minToLabel(tb.morningEnd)+'). Once students are placed, click a shift to set its start and end time for that day or for every week. Booking times for families aren\'t affected.</p>';
+  html+='<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">'
+    +weeks.map(function(m,i){ return '<button class="btn sm'+(i===wi?' primary':' ghost')+'" onclick="setSummerShiftWeek('+i+')">Week of '+fmtShort(m)+'</button>'; }).join('')
+    +'<button class="btn sm" style="margin-left:auto" onclick="fitSummerWeekToBookings('+wi+')" title="Set every shift this week to start when its first student arrives and finish when its last one leaves">Fit this week to placed students</button>'
+  +'</div>';
+  const podsOn=pods.filter(function(p){ return dates.some(function(d){ return termBreakShiftOn(tb, p.id, d); }); });
+  if(!podsOn.length){ return html+'<div class="empty-note">No Pods have an instructor this week yet — assign them in the grid above.</div></div>'; }
+  html+='<div style="overflow-x:auto"><table><tr><th>Pod</th>'+dates.map(function(d){ return '<th>'+WEEKDAY_KEYS[(d.getDay()+6)%7]+' '+d.getDate()+'</th>'; }).join('')+'</tr>';
+  podsOn.forEach(function(p){
+    html+='<tr><td><b>'+p.name+'</b></td>'+dates.map(function(d){
+      if(isClosedDate(d)) return '<td class="small muted">Closed</td>';
+      const sh=termBreakShiftOn(tb, p.id, d);
+      if(!sh) return '<td class="small muted">—</td>';
+      const span=termBreakBookedSpan(p.id, toKey(d));
+      const outside=span.count && (span.start<sh.start || span.end>sh.end);
+      const instr=findInstructor(sh.instructorId);
+      return '<td style="cursor:pointer;white-space:nowrap'+(outside?';background:var(--danger-bg)':'')+'" onclick="openSummerShiftForm(\''+p.id+'\',\''+toKey(d)+'\')" title="Change this shift\'s times">'
+        +'<div class="small">'+(instr?instr.name:'—')+'</div>'
+        +'<div><b>'+minToLabel(sh.start)+'–'+minToLabel(sh.end)+'</b>'+(sh.source==='day'? ' <span class="badge soon" title="Set for this day only">day</span>' : sh.source==='weekly'? ' <span class="badge available" title="Usual times for this weekday">weekly</span>' : '')+'</div>'
+        +'<div class="small muted">'+(span.count? span.count+' student'+(span.count===1?'':'s')+' · '+minToLabel(span.start)+'–'+minToLabel(span.end) : 'No students yet')+'</div>'
+        +(outside? '<div class="small" style="color:var(--danger)">Students outside these times</div>' : '')
+      +'</td>';
+    }).join('')+'</tr>';
+  });
+  html+='</table></div>';
+  return html+'</div>';
+}
+function fitSummerWeekToBookings(wi){
+  const tb=summerBreakForBooking(true); if(!tb) return;
+  const monday=summerWeekMondays(tb)[wi]; if(!monday) return;
+  const changes=[];
+  [0,1,2,3,4].map(function(i){ return addDays(monday,i); }).forEach(function(d){
+    if(toKey(d)<toKey(tb.startDate) || toKey(d)>toKey(tb.endDate) || isClosedDate(d)) return;
+    pods.forEach(function(p){
+      const sh=termBreakShiftOn(tb, p.id, d); if(!sh) return;
+      const span=termBreakBookedSpan(p.id, toKey(d)); if(!span.count) return;
+      if(span.start!==sh.start || span.end!==sh.end) changes.push({podId:p.id, dateKey:toKey(d), start:span.start, end:span.end});
+    });
+  });
+  if(!changes.length){ toast('Every shift this week already matches its placed students.'); return; }
+  if(!confirm('Set '+changes.length+' shift'+(changes.length===1?'':'s')+' in the week of '+fmtShort(monday)+' to start when the first student arrives and finish when the last one leaves?\n\nShifts with no students placed are left as they are.')) return;
+  changes.forEach(function(c){ setTermBreakShiftDay(tb, c.podId, c.dateKey, c.start, c.end); });
+  toast(changes.length+' shift'+(changes.length===1?'':'s')+' updated for the week of '+fmtShort(monday)+'.');
+  render();
+}
+function openSummerShiftForm(podId, dateKey){
+  const tb=summerBreakForBooking(true); if(!tb) return;
+  const sh=termBreakShiftOn(tb, podId, new Date(dateKey)); if(!sh) return;
+  state.summerShiftForm={podId:podId, dateKey:dateKey, start:sh.start, end:sh.end, scope:'day', error:''};
+  render();
+}
+function closeSummerShiftForm(){ state.summerShiftForm=null; render(); }
+function setSummerShiftField(field, value){
+  const f=state.summerShiftForm; if(!f) return;
+  f[field]=(field==='start'||field==='end')? Number(value) : value;
+  f.error='';
+  render();
+}
+function useBookedTimesForSummerShift(){
+  const f=state.summerShiftForm, tb=summerBreakForBooking(true); if(!f || !tb) return;
+  let span;
+  if(f.scope==='weekly'){
+    const wd=WEEKDAY_KEYS[(new Date(f.dateKey).getDay()+6)%7];
+    const spans=termBreakDatesForWeekday(tb, wd).map(function(d){ return termBreakBookedSpan(f.podId, toKey(d)); }).filter(function(s){ return s.count; });
+    span=spans.length? {count:1, start:Math.min.apply(null, spans.map(function(s){ return s.start; })), end:Math.max.apply(null, spans.map(function(s){ return s.end; }))} : {count:0};
+  } else span=termBreakBookedSpan(f.podId, f.dateKey);
+  if(!span.count){ f.error='No students are placed '+(f.scope==='weekly'? 'on this weekday' : 'that day')+' yet.'; render(); return; }
+  f.start=span.start; f.end=span.end; f.error='';
+  render();
+}
+function saveSummerShiftForm(){
+  const f=state.summerShiftForm, tb=summerBreakForBooking(true); if(!f || !tb) return;
+  if(!(f.end>f.start)){ f.error='The finish time has to be after the start time.'; render(); return; }
+  const pod=findPod(f.podId), date=new Date(f.dateKey), wd=WEEKDAY_KEYS[(date.getDay()+6)%7];
+  if(f.scope==='weekly'){
+    setTermBreakWeeklyTimes(tb, f.podId, wd, f.start, f.end);
+    toast(pod.name+' every '+wd+' this summer: '+minToLabel(f.start)+'–'+minToLabel(f.end)+'. Days set on their own keep their own times.', 6000);
+  } else {
+    setTermBreakShiftDay(tb, f.podId, f.dateKey, f.start, f.end);
+    toast(pod.name+' on '+fmtShort(date)+': '+minToLabel(f.start)+'–'+minToLabel(f.end)+'.');
+  }
+  state.summerShiftForm=null;
+  render();
+}
+function resetSummerShiftDay(){
+  const f=state.summerShiftForm, tb=summerBreakForBooking(true); if(!f || !tb) return;
+  clearTermBreakShiftDay(tb, f.podId, f.dateKey);
+  toast(findPod(f.podId).name+' on '+fmtShort(new Date(f.dateKey))+' is back to its usual times.');
+  state.summerShiftForm=null;
+  render();
+}
+function renderSummerShiftModal(){
+  const f=state.summerShiftForm;
+  if(!f) return '';
+  const tb=summerBreakForBooking(true); if(!tb) return '';
+  const date=new Date(f.dateKey), wd=WEEKDAY_KEYS[(date.getDay()+6)%7];
+  const sh=termBreakShiftOn(tb, f.podId, date); if(!sh) return '';
+  const pod=findPod(f.podId), instr=findInstructor(sh.instructorId);
+  const span=termBreakBookedSpan(f.podId, f.dateKey);
+  let html='<div class="overlay" onclick="if(event.target===this) closeSummerShiftForm()"><div class="modal">';
+  html+='<h3>'+pod.name+' · '+fmtLong(date)+'</h3>';
+  html+='<p class="small muted">'+(instr?instr.name:'—')+' · currently '+minToLabel(sh.start)+'–'+minToLabel(sh.end)
+    +(sh.source==='day'? ' (set for this day)' : sh.source==='weekly'? ' (usual '+wd+' times)' : ' (opening hours)')+'<br>'
+    +(span.count? span.count+' student'+(span.count===1?'':'s')+' placed, '+minToLabel(span.start)+'–'+minToLabel(span.end) : 'No students placed that day yet')+'</p>';
+  if(f.error) html+='<div class="banner danger">'+f.error+'</div>';
+  html+='<div class="row2"><div><label>Start</label><select onchange="setSummerShiftField(\'start\',this.value)">'+dayTimeOptionsHtml(f.start)+'</select></div>'
+    +'<div><label>Finish</label><select onchange="setSummerShiftField(\'end\',this.value)">'+dayTimeOptionsHtml(f.end)+'</select></div></div>';
+  html+='<div style="margin-top:8px"><label style="font-weight:400;display:block"><input type="radio" name="summerShiftScope" '+(f.scope==='day'?'checked':'')+' onchange="setSummerShiftField(\'scope\',\'day\')"/> This day only</label>'
+    +'<label style="font-weight:400;display:block"><input type="radio" name="summerShiftScope" '+(f.scope==='weekly'?'checked':'')+' onchange="setSummerShiftField(\'scope\',\'weekly\')"/> Every '+wd+' this summer (days set on their own keep their times)</label></div>';
+  html+='<div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">'
+    +'<button class="btn sm ghost" onclick="useBookedTimesForSummerShift()">Use placed students\' times</button>'
+    +(sh.source==='day'? '<button class="btn sm ghost" onclick="resetSummerShiftDay()">Back to usual times</button>' : '')
+    +'<span style="flex:1"></span>'
+    +'<button class="btn ghost" onclick="closeSummerShiftForm()">Cancel</button>'
+    +'<button class="btn primary" onclick="saveSummerShiftForm()">Save</button>'
+  +'</div>';
+  html+='</div></div>';
+  return html;
+}
 function openSummerAttendForm(studentId){ state.summerAttendForm={studentId:studentId}; render(); }
 function closeSummerAttendForm(){ state.summerAttendForm=null; render(); }
 function renderSummerAttendModal(){
@@ -8516,6 +8710,8 @@ function renderStaff(){
   } else if(tab==='summer'){
     html+=renderTermBreaksPanel();
     html+=renderSummerAttendancePanel(); // Nov 2026
+    html+=renderSummerShiftTimesPanel(); // Nov 2026
+    html+=renderSummerShiftModal();
     // One child's summer days, and the booking screens it opens on top.
     html+=renderSummerAttendModal();
     html+=renderTermBreakRecurringModal();
@@ -10799,7 +10995,9 @@ function instructorShiftsAhead(instructorId){
     const tb=termBreakOn(date);
     pods.forEach(function(pod){
       if(tb){
-        if(termBreakCoverageFor(tb, pod.id, weekday)===instructorId) regular.push({date, start:tb.morningStart, end:tb.morningEnd, podId:pod.id, status:'on', note:tb.label||'Summer hours'});
+        // Summer shift times (Nov 2026): that day's own times, else the usual ones, else opening hours.
+        const sh=termBreakShiftOn(tb, pod.id, date);
+        if(sh && sh.instructorId===instructorId) regular.push({date, start:sh.start, end:sh.end, podId:pod.id, status:'on', note:tb.label||'Summer hours'});
         return;
       }
       const blocks=podBlocksForDay(pod.id, weekday);
@@ -12569,7 +12767,7 @@ var DATA_GROUP_TABLES={
   staffMembers:['staff_members','staff_one_offs'],
   staffRosteredShifts:['staff_rostered_shifts'],
   staffAttendance:['staff_attendance'],
-  termBreaks:['term_breaks','term_break_coverage','instructor_summer_availability'],
+  termBreaks:['term_breaks','term_break_coverage','instructor_summer_availability','term_break_shift_days'],
 };
 var TABLE_TO_GROUP={};
 Object.keys(DATA_GROUP_TABLES).forEach(function(g){ DATA_GROUP_TABLES[g].forEach(function(t){ TABLE_TO_GROUP[t]=g; }); });
@@ -13049,18 +13247,28 @@ function fetchClosedDaysGroup(){
 function fetchTermBreaksGroup(){
   return Promise.all([
     fetchTablePaginated('term_breaks','id,label,start_date,end_date,morning_start,morning_end,visible_to_parents'),
-    fetchTablePaginated('term_break_coverage','term_break_id,pod_id,weekday,instructor_id'),
+    // Summer shift times (Nov 2026, add_summer_shift_times.sql). Each falls back quietly if that
+    // database change isn't there yet, so the rest of the summer set-up still loads.
+    fetchTablePaginated('term_break_coverage','term_break_id,pod_id,weekday,instructor_id,start_min,end_min')
+      .catch(function(){ return fetchTablePaginated('term_break_coverage','term_break_id,pod_id,weekday,instructor_id'); }),
     fetchTablePaginated('instructor_summer_availability','instructor_id,term_break_id,weekdays,away_dates,note,updated_at'), // Nov 2026
+    fetchTablePaginated('term_break_shift_days','term_break_id,pod_id,the_date,start_min,end_min').catch(function(){ return []; }),
   ]).then(function(t){
-    const [termBreakRows,termBreakCoverRows,summerRows]=t;
+    const [termBreakRows,termBreakCoverRows,summerRows,shiftDayRows]=t;
     summerAvail=summerRows.map(function(r){ return {instructorId:r.instructor_id, termBreakId:r.term_break_id, weekdays:r.weekdays||[], awayDates:r.away_dates||[], note:r.note||'', updatedAt:r.updated_at? new Date(r.updated_at) : null}; });
     termBreaks=termBreakRows.map(function(r){
-      const coverage={};
+      const coverage={}, coverageTimes={};
       termBreakCoverRows.filter(function(c){ return c.term_break_id===r.id; }).forEach(function(c){
         coverage[c.pod_id]=coverage[c.pod_id]||{};
         coverage[c.pod_id][c.weekday]=c.instructor_id;
+        if(c.start_min!=null && c.end_min!=null){
+          coverageTimes[c.pod_id]=coverageTimes[c.pod_id]||{};
+          coverageTimes[c.pod_id][c.weekday]={start:c.start_min, end:c.end_min};
+        }
       });
-      return {id:r.id, label:r.label, startDate:new Date(r.start_date), endDate:new Date(r.end_date), morningStart:r.morning_start, morningEnd:r.morning_end, visibleToParents:!!r.visible_to_parents, coverage:coverage};
+      const shiftDays=(shiftDayRows||[]).filter(function(d){ return d.term_break_id===r.id; })
+        .map(function(d){ return {podId:d.pod_id, dateKey:d.the_date, start:d.start_min, end:d.end_min}; });
+      return {id:r.id, label:r.label, startDate:new Date(r.start_date), endDate:new Date(r.end_date), morningStart:r.morning_start, morningEnd:r.morning_end, visibleToParents:!!r.visible_to_parents, coverage:coverage, coverageTimes:coverageTimes, shiftDays:shiftDays};
     });
   });
 }
