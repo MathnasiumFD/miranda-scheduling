@@ -12488,7 +12488,7 @@ function renderTermBreakPlanModal(){
       const opens=termBreakPlanOpenStarts(tb, d.weekday, d.dateKey, f.duration);
       const cur=f.picks[d.dateKey];
       html+='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:3px 0;border-bottom:1px solid var(--border)"><div>'+(cur!=null? '<b>'+label+'</b>' : label)+'</div>'
-        +(opens.length? '<select style="width:auto;margin:0;padding:4px 8px" onchange="setTermBreakPlanPick(\''+d.dateKey+'\',this.value)"><option value="">Not this day</option>'
+        +(opens.length? '<select style="width:auto;margin:0;padding:4px 8px" onchange="setTermBreakPlanPick(\''+d.dateKey+'\',this.value)"><option value="">Select time</option>'
             +opens.map(function(st){ return '<option value="'+st+'"'+(st===cur?' selected':'')+'>'+minToLabel(st)+'</option>'; }).join('')+'</select>'
           : '<span class="small muted">Full</span>')
       +'</div>';
