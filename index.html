@@ -1335,12 +1335,12 @@ function openTermBreakBookingForm(studentId){
   // Only ever a break front desk has switched on for parents (see setTermBreakVisibility) — the
   // parent view's own link is already gated the same way, so this only matters against someone
   // calling it directly (e.g. a stale link left open from before front desk turned visibility off).
-  const visibleBreaks=termBreaks.filter(function(t){ return t.visibleToParents; });
-  const tb=visibleBreaks.find(function(t){ return termBreakOn(now)===t; })
-    || visibleBreaks.filter(function(t){ return toKey(t.startDate)>=toKey(now); }).sort(function(a,b){ return toKey(a.startDate).localeCompare(toKey(b.startDate)); })[0]; // current, or the soonest upcoming one
+  // Front desk (Nov 2026) can book a hidden period and past the allowance.
+  const staff=actingAsFrontDesk();
+  const tb=summerBreakForBooking(staff); // current, or the soonest upcoming one
   if(!tb){ toast('No summer hours period is available to book right now.'); render(); return; }
   const student=findStudent(studentId);
-  if(studentTermBreakRemaining(tb, studentId)<=0){ toast('No summer session credits left for '+student.name+' this period.'); render(); return; }
+  if(!staff && studentTermBreakRemaining(tb, studentId)<=0){ toast('No summer session credits left for '+student.name+' this period.'); render(); return; }
   state.termBreakBookingForm={studentId:studentId, termBreakId:tb.id, date:toKey(tb.startDate)<toKey(now)? toKey(now) : toKey(tb.startDate), start:null, duration:student.duration, error:''};
   // Land on the first real weekday >= the default date, same idea as the rest of the app's date pickers.
   while(WEEKDAY_KEYS.indexOf(WEEKDAY_KEYS[(new Date(state.termBreakBookingForm.date).getDay()+6)%7])===-1 || isClosedDate(new Date(state.termBreakBookingForm.date))){
@@ -1361,8 +1361,9 @@ function confirmTermBreakBooking(){
   const f=state.termBreakBookingForm; if(!f) return;
   const tb=termBreaks.find(function(t){ return t.id===f.termBreakId; });
   if(!tb){ f.error='This summer hours period no longer exists.'; render(); return; }
-  if(!tb.visibleToParents){ f.error='This summer hours period isn\'t available for booking right now.'; render(); return; }
-  if(studentTermBreakRemaining(tb, f.studentId)<=0){ f.error='No summer session credits left for this period.'; render(); return; }
+  const staff=actingAsFrontDesk();
+  if(!staff && !tb.visibleToParents){ f.error='This summer hours period isn\'t available for booking right now.'; render(); return; }
+  if(!staff && studentTermBreakRemaining(tb, f.studentId)<=0){ f.error='No summer session credits left for this period.'; render(); return; }
   if(!f.date || f.start==null){ f.error='Choose a date and a time.'; render(); return; }
   const dateKey=f.date;
   if(dateKey<toKey(tb.startDate) || dateKey>toKey(tb.endDate)){ f.error='Pick a date within the summer hours period ('+fmtShort(tb.startDate)+'–'+fmtShort(tb.endDate)+').'; render(); return; }
@@ -1373,14 +1374,14 @@ function confirmTermBreakBooking(){
   const student=findStudent(f.studentId);
   const pick=termBreakPickBestPod(tb, weekday, dateKey, f.start, f.duration);
   if(!pick){ f.error='That time just filled up — pick another.'; render(); return; }
-  const sess={id:newId()||('sess'+(nextSessionId++)), studentId:student.id, podId:pick.podId, online:false, instructorId:pick.instructorId, instructorId2:null, handoff:null, date:date, start:f.start, duration:f.duration, status:'scheduled', bookedBy:'parent', creditId:null, recurring:false, termBreak:true};
+  const sess={id:newId()||('sess'+(nextSessionId++)), studentId:student.id, podId:pick.podId, online:false, instructorId:pick.instructorId, instructorId2:null, handoff:null, date:date, start:f.start, duration:f.duration, status:'scheduled', bookedBy:staff?'staff':'parent', creditId:null, recurring:false, termBreak:true};
   sessions.push(sess);
   dbWrite('booking a summer-hours session', function(){ return supabaseClient.from('sessions').insert({
     id:sess.id, student_id:sess.studentId, pod_id:sess.podId, online:false, instructor_id:sess.instructorId,
     instructor_id_2:null, handoff_min:null, the_date:toKey(sess.date), start_min:sess.start, duration:sess.duration,
     status:sess.status, booked_by:sess.bookedBy, credit_id:null, is_recurring:false, term_break:true
   }); });
-  toast('Booked '+fmtLong(date)+' at '+minToLabel(f.start)+' — see you then!');
+  toast(staff? 'Booked '+student.name+' for '+fmtLong(date)+' at '+minToLabel(f.start)+'.' : 'Booked '+fmtLong(date)+' at '+minToLabel(f.start)+' — see you then!');
   state.termBreakBookingForm=null;
   render();
 }
@@ -1468,19 +1469,84 @@ function studentTermBreakRecurringPicks(tb, studentId){
   });
   return picks;
 }
+// ---------- Summer release (Nov 2026, per Allie) ----------
+// "when they log on it automatically takes them to the summer schedule tab ... if they have not set
+// their summer days yet. If the child is on hold across the entire summer period then dont worry
+// about it. if their enrolment will be cancelled before 18th Dec [the summer start], also don't
+// worry about it." Plus: "a way as front desk to manually change student attendance for the summer".
+//
+// Front desk is acting (not a parent) — front desk may book summer sessions before the period is
+// visible to parents and past a family's summer allowance.
+function actingAsFrontDesk(){ return currentUser? currentUser.role==='staff' : state.role==='staff'; }
+// The summer period being booked: the one running now, else the soonest upcoming one. Parents only
+// ever get one that's visible to them; front desk gets hidden ones too.
+function summerBreakForBooking(includeHidden){
+  const now=simNow();
+  const list=termBreaks.filter(function(t){ return includeHidden || t.visibleToParents; });
+  return list.find(function(t){ return termBreakOn(now)===t; })
+    || list.filter(function(t){ return toKey(t.startDate)>=toKey(now); }).sort(function(a,b){ return toKey(a.startDate).localeCompare(toKey(b.startDate)); })[0]
+    || null;
+}
+// True when the child's holds (one or several back to back) cover every day from start to end.
+function holdsCoverRange(holds, start, end){
+  let cursor=toKey(start);
+  const endKey=toKey(end);
+  (holds||[]).slice().sort(function(a,b){ return toKey(a.start).localeCompare(toKey(b.start)); }).forEach(function(h){
+    if(cursor>endKey) return;
+    if(toKey(h.start)<=cursor && toKey(h.end)>=cursor) cursor=toKey(addDays(new Date(toKey(h.end)),1));
+  });
+  return cursor>endKey;
+}
+// Why a child doesn't need summer days at all, or null if they do.
+function summerSkipReason(student, tb){
+  if(!student || !tb) return 'No summer period';
+  if(student.heldUntil) return 'Spot held, not started yet';
+  if(student.startDate && toKey(student.startDate)>toKey(tb.endDate)) return 'Starts after summer';
+  if(student.stoppedFrom && toKey(student.stoppedFrom)<=toKey(tb.startDate)) return 'Enrolment ends before summer';
+  if(studentPlanOn(student.id, tb.startDate).stopped) return 'Enrolment ends before summer';
+  if(holdsCoverRange(student.holds, tb.startDate, tb.endDate)) return 'On hold all summer';
+  if(!(student.sessionsPerWeek>0)) return 'No regular sessions';
+  return null;
+}
+// A child still to choose summer days: needs them, and has nothing booked for this summer yet.
+function studentNeedsSummerDays(student, tb){
+  return !summerSkipReason(student, tb) && studentTermBreakUsed(tb, student.id)===0;
+}
+// On a parent's sign-in: open the Summer Schedule tab instead of My Schedule if any child they can
+// manage still needs summer days. Only once per page load, so it never pulls them back later.
+var parentLandingDone=false;
+function chooseParentLandingTab(){
+  if(parentLandingDone || !currentUser || currentUser.role!=='parent') return;
+  parentLandingDone=true;
+  const tb=summerBreakForBooking(false);
+  if(!tb) return;
+  const ids=parentStudentIdsFor(currentUser.parentId);
+  if(ids.some(function(sid){ const s=findStudent(sid); return s && parentCanManage(sid) && studentNeedsSummerDays(s, tb); })) state.parentTab='summer';
+}
+// Front desk cancelling one summer session: no make-up credit, and it frees the summer allowance
+// back up (same as any front-desk cancellation — see studentTermBreakUsed).
+function staffCancelTermBreakSession(sessionId){
+  const sess=findSession(sessionId);
+  if(!sess || sess.status!=='scheduled' || !sess.termBreak) return;
+  const student=findStudent(sess.studentId);
+  if(!confirm('Cancel '+student.name+'\'s summer session on '+fmtLong(sess.date)+' at '+minToLabel(sess.start)+'?\n\nNo make-up credit is issued, and it goes back into their summer allowance.')) return;
+  sess.status='cancelled';
+  dbWrite('cancelling a summer-hours session (front desk)', function(){ return supabaseClient.from('sessions').update({status:'cancelled'}).eq('id', sess.id); });
+  toast('Summer session on '+fmtShort(sess.date)+' cancelled.');
+  render();
+}
 // A parent picking ONE recurring weekday/time for the break (Sept 2026, per Allie: "the option to
 // book either recurring days and times, or singular days and times") — confirming it immediately
 // books every matching week at once (see confirmTermBreakRecurringBooking below), rather than just
 // pre-filling the singular picker week by week.
 function openTermBreakRecurringForm(studentId){
   const now=simNow();
-  const visibleBreaks=termBreaks.filter(function(t){ return t.visibleToParents; });
-  const tb=visibleBreaks.find(function(t){ return termBreakOn(now)===t; })
-    || visibleBreaks.filter(function(t){ return toKey(t.startDate)>=toKey(now); }).sort(function(a,b){ return toKey(a.startDate).localeCompare(toKey(b.startDate)); })[0];
+  const staff=actingAsFrontDesk(); // front desk (Nov 2026): hidden periods too, no cap
+  const tb=summerBreakForBooking(staff);
   if(!tb){ toast('No summer hours period is available to book right now.'); render(); return; }
   const student=findStudent(studentId);
   const picks=studentTermBreakRecurringPicks(tb, studentId);
-  if(picks.length>=(student.sessionsPerWeek||0)){ toast('You already have the most recurring summer times '+student.name+' can have at once ('+picks.length+').'); render(); return; }
+  if(!staff && picks.length>=(student.sessionsPerWeek||0)){ toast('You already have the most recurring summer times '+student.name+' can have at once ('+picks.length+').'); render(); return; }
   state.termBreakRecurringForm={studentId:studentId, termBreakId:tb.id, weekday:'Mon', start:null, duration:student.duration, error:''};
   render();
 }
@@ -1496,13 +1562,15 @@ function confirmTermBreakRecurringBooking(){
   const f=state.termBreakRecurringForm; if(!f) return;
   const tb=termBreaks.find(function(t){ return t.id===f.termBreakId; });
   if(!tb){ f.error='This summer hours period no longer exists.'; render(); return; }
-  if(!tb.visibleToParents){ f.error='This summer hours period isn\'t available for booking right now.'; render(); return; }
+  const staff=actingAsFrontDesk();
+  if(!staff && !tb.visibleToParents){ f.error='This summer hours period isn\'t available for booking right now.'; render(); return; }
   if(f.start==null){ f.error='Choose a time.'; render(); return; }
   const student=findStudent(f.studentId);
   const existingPicks=studentTermBreakRecurringPicks(tb, f.studentId);
-  if(existingPicks.length>=(student.sessionsPerWeek||0)){ f.error='You already have the most recurring summer times '+student.name+' can have at once.'; render(); return; }
+  if(!staff && existingPicks.length>=(student.sessionsPerWeek||0)){ f.error='You already have the most recurring summer times '+student.name+' can have at once.'; render(); return; }
   if(existingPicks.some(function(p){ return p.weekday===f.weekday && p.start===f.start; })){ f.error='Already set up for this day and time.'; render(); return; }
-  let remaining=studentTermBreakRemaining(tb, f.studentId);
+  // Front desk isn't held to the summer allowance — every week of the period gets booked.
+  let remaining=staff? Infinity : studentTermBreakRemaining(tb, f.studentId);
   if(remaining<=0){ f.error='No summer session credits left to use for a recurring time.'; render(); return; }
   // Every occurrence of this weekday within the break, from today (or the break's start, whichever
   // is later) through its end — generated all at once since a term break is short and fully known up
@@ -1521,7 +1589,7 @@ function confirmTermBreakRecurringBooking(){
       const pick=termBreakPickBestPod(tb, f.weekday, dateKey, f.start, f.duration);
       if(!pick){ skippedNoRoom++; }
       else{
-        const sess={id:newId()||('sess'+(nextSessionId++)), studentId:student.id, podId:pick.podId, online:false, instructorId:pick.instructorId, instructorId2:null, handoff:null, date:new Date(d), start:f.start, duration:f.duration, status:'scheduled', bookedBy:'parent', creditId:null, recurring:true, termBreak:true};
+        const sess={id:newId()||('sess'+(nextSessionId++)), studentId:student.id, podId:pick.podId, online:false, instructorId:pick.instructorId, instructorId2:null, handoff:null, date:new Date(d), start:f.start, duration:f.duration, status:'scheduled', bookedBy:staff?'staff':'parent', creditId:null, recurring:true, termBreak:true};
         sessions.push(sess);
         dbWrite('booking a recurring summer-hours session', function(){ return supabaseClient.from('sessions').insert({
           id:sess.id, student_id:sess.studentId, pod_id:sess.podId, online:false, instructor_id:sess.instructorId,
@@ -1797,6 +1865,8 @@ var state={
   podAssignForm:null,
   quickCoverageForm:null,
   staffPodMoveForm:null, // move a staff member to another Pod, today only (Nov 2026)
+  summerAttendForm:null, // front desk: one student's summer days (Nov 2026)
+  summerAttendFilter:{q:'', show:'all'},
   quickMoveForm:null,
   parentBookingCreditId:null,
   newStudentForm:null,
@@ -8203,6 +8273,94 @@ function renderTermBreaksPanel(){
   html+=renderAddTermBreakModal();
   return html;
 }
+// Front desk: every student's summer attendance in one list (Nov 2026, per Allie: "i need a way as
+// front desk to manually change student attendance for the summer as well"). Works before the period
+// is visible to parents, so families can be placed in advance. "Manage" opens one child's summer
+// days: add or remove a weekly time, book or cancel a single day — the same booking screens parents
+// use, without the visibility and allowance limits.
+function setSummerAttendFilter(field, value){
+  state.summerAttendFilter=state.summerAttendFilter||{q:'', show:'all'};
+  state.summerAttendFilter[field]=value;
+  render();
+}
+function summerAttendStatus(student, tb){
+  const skip=summerSkipReason(student, tb);
+  if(skip) return {key:'skip', html:'<span class="badge expired">'+skip+'</span>'};
+  const used=studentTermBreakUsed(tb, student.id), total=studentTermBreakCredits(tb, student.id);
+  if(used===0) return {key:'notset', html:'<span class="badge soon">Not set yet</span>'};
+  return {key:'set', html:'<span class="badge available">Set</span>'+(used>total? ' <span class="small muted">('+(used-total)+' over allowance)</span>' : '')};
+}
+function renderSummerAttendancePanel(){
+  const tb=summerBreakForBooking(true);
+  let html=sectionOpen('summerAttendance','Student summer attendance');
+  if(!tb){ return html+'<div class="empty-note">No current or upcoming summer hours period.</div></div>'; }
+  const flt=state.summerAttendFilter||{q:'', show:'all'};
+  const todayKey=toKey(simNow());
+  const rows=students.filter(function(s){ return !(s.stoppedFrom && toKey(s.stoppedFrom)<=todayKey); })
+    .map(function(s){ return {s:s, st:summerAttendStatus(s, tb)}; });
+  const counts={notset:0, set:0, skip:0};
+  rows.forEach(function(r){ counts[r.st.key]++; });
+  html+='<p class="small muted">'+tb.label+', '+fmtShort(tb.startDate)+'–'+fmtShort(tb.endDate)+(tb.visibleToParents? '' : ' · <b>hidden from parents</b> (you can still place students)')+'. Click Manage to change a student\'s summer days. Front desk bookings aren\'t limited by the family\'s summer allowance.</p>';
+  html+='<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">'
+    +'<input type="search" placeholder="Search student…" value="'+escapeHtml(flt.q)+'" oninput="setSummerAttendFilter(\'q\',this.value)" style="max-width:220px"/>'
+    +[['all','All'],['notset','Not set yet ('+counts.notset+')'],['set','Set ('+counts.set+')'],['skip','Not needed ('+counts.skip+')']].map(function(o){
+      return '<button class="btn sm'+(flt.show===o[0]?' primary':' ghost')+'" onclick="setSummerAttendFilter(\'show\',\''+o[0]+'\')">'+o[1]+'</button>';
+    }).join('')
+  +'</div>';
+  const q=(flt.q||'').trim().toLowerCase();
+  const shown=rows.filter(function(r){ return (flt.show==='all' || r.st.key===flt.show) && (!q || r.s.name.toLowerCase().indexOf(q)>=0); })
+    .sort(function(a,b){ return a.s.name.localeCompare(b.s.name); });
+  if(!shown.length){ return html+'<div class="empty-note">No students match.</div></div>'; }
+  html+='<div style="overflow-x:auto"><table><tr><th>Student</th><th>Normally</th><th>Summer days</th><th>Booked</th><th>Status</th><th></th></tr>'
+    +shown.map(function(r){
+      const s=r.s;
+      const picks=studentTermBreakRecurringPicks(tb, s.id);
+      return '<tr><td><b>'+s.name+'</b></td>'
+        +'<td class="small">'+(s.sessionsPerWeek||0)+'x/week</td>'
+        +'<td class="small">'+(picks.length? picks.map(function(p){ return p.weekday+' '+minToLabel(p.start); }).join(', ') : '<span class="muted">—</span>')+'</td>'
+        +'<td class="small">'+studentTermBreakUsed(tb, s.id)+' of '+studentTermBreakCredits(tb, s.id)+'</td>'
+        +'<td>'+r.st.html+'</td>'
+        +'<td><button class="btn sm" onclick="openSummerAttendForm(\''+s.id+'\')">Manage</button></td></tr>';
+    }).join('')
+  +'</table></div>';
+  return html+'</div>';
+}
+function openSummerAttendForm(studentId){ state.summerAttendForm={studentId:studentId}; render(); }
+function closeSummerAttendForm(){ state.summerAttendForm=null; render(); }
+function renderSummerAttendModal(){
+  const f=state.summerAttendForm;
+  if(!f) return '';
+  const tb=summerBreakForBooking(true);
+  const student=findStudent(f.studentId);
+  if(!tb || !student) return '';
+  const skip=summerSkipReason(student, tb);
+  const picks=studentTermBreakRecurringPicks(tb, student.id);
+  const startKey=toKey(tb.startDate), endKey=toKey(tb.endDate), todayKey=toKey(simNow());
+  const upcoming=sessions.filter(function(s){ const dk=toKey(s.date); return s.studentId===student.id && s.termBreak && s.status==='scheduled' && dk>=startKey && dk<=endKey && dk>=todayKey; })
+    .sort(function(a,b){ return toKey(a.date).localeCompare(toKey(b.date)) || a.start-b.start; });
+  let html='<div class="overlay" onclick="if(event.target===this) closeSummerAttendForm()"><div class="modal">';
+  html+='<h3>'+student.name+' — summer days</h3>';
+  html+='<p class="small muted">'+tb.label+', '+fmtShort(tb.startDate)+'–'+fmtShort(tb.endDate)+' · normally '+(student.sessionsPerWeek||0)+'x/week · '+studentTermBreakUsed(tb, student.id)+' of '+studentTermBreakCredits(tb, student.id)+' summer sessions booked</p>';
+  if(skip) html+='<div class="banner warn">'+skip+' — they don\'t need summer days, but you can still book them.</div>';
+  html+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">'
+    +'<button class="btn sm primary" onclick="openTermBreakRecurringForm(\''+student.id+'\')">+ Add a weekly time</button>'
+    +'<button class="btn sm" onclick="openTermBreakBookingForm(\''+student.id+'\')">+ Book a single day</button>'
+  +'</div>';
+  html+='<div class="section-label">Weekly summer times</div>';
+  html+=picks.length? '<div class="session-list">'+picks.map(function(p){
+      return '<div class="session-row"><div class="session-main"><b>Every '+p.weekday+' '+minToLabel(p.start)+'</b></div>'
+        +'<button class="btn sm ghost" onclick="removeTermBreakRecurringPick(\''+student.id+'\',\''+p.weekday+'\','+p.start+')">Remove</button></div>';
+    }).join('')+'</div>' : '<div class="empty-note">None.</div>';
+  html+='<div class="section-label">Booked summer days</div>';
+  html+=upcoming.length? '<div class="session-list">'+upcoming.map(function(s){
+      const pod=findPod(s.podId);
+      return '<div class="session-row"><div class="session-main"><b>'+fmtShort(s.date)+' · '+rangeLabel(s.start,s.duration)+'</b><div class="small muted">'+(pod?pod.name:'—')+(s.recurring?' · weekly':' · single day')+'</div></div>'
+        +'<button class="btn sm ghost" onclick="staffCancelTermBreakSession(\''+s.id+'\')">Cancel</button></div>';
+    }).join('')+'</div>' : '<div class="empty-note">Nothing booked.</div>';
+  html+='<div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn ghost" onclick="closeSummerAttendForm()">Done</button></div>';
+  html+='</div></div>';
+  return html;
+}
 function renderAddTermBreakModal(){
   const f=state.termBreakForm;
   if(!f) return '';
@@ -8357,6 +8515,11 @@ function renderStaff(){
     html+=renderPastHoldsPanel();
   } else if(tab==='summer'){
     html+=renderTermBreaksPanel();
+    html+=renderSummerAttendancePanel(); // Nov 2026
+    // One child's summer days, and the booking screens it opens on top.
+    html+=renderSummerAttendModal();
+    html+=renderTermBreakRecurringModal();
+    html+=renderTermBreakBookingModal();
   }
 
   // Modals always render regardless of which tab is active — every one of these is only ever
@@ -12494,6 +12657,7 @@ function afterLogin(){
       currentUser={role:r.data.role, instructorId:r.data.instructor_id, parentId:r.data.parent_id, email:res.data.user.email};
       loadAllData().then(function(){
         state.role=currentUser.role;
+        chooseParentLandingTab(); // Summer Schedule first if summer days still need setting (Nov 2026)
         applyPromotions();
         applyPlanChanges();
         regenerateAllRecurring();
