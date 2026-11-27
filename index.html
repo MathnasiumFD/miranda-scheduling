@@ -12500,7 +12500,11 @@ function renderTermBreakPlanModal(){
   const dates=termBreakPlanDates(tb, f.studentId);
   let html='<div class="overlay" onclick="if(event.target===this) closeTermBreakPlanForm()"><div class="modal" style="max-width:640px">';
   html+='<h3>Book '+student.name+'\'s summer sessions</h3>';
-  html+='<p class="small">Pick a time on every day you\'d like to come, then book them all at once. You don\'t have to use them all now — any you don\'t book stay available to book later, and any still unused when summer ends become make-up credits.'+(staff? '' : ' '+SUMMER_CUTOFF_NOTE)+'</p>';
+  // Wording per Allie (Nov 2026), in the Summer Schedule page's even paragraph style.
+  const P=function(inner){ return '<p style="margin:0 0 10px;color:var(--text);font-size:.85rem;line-height:1.5">'+inner+'</p>'; };
+  html+=P('Select your preferred dates and times, then confirm all your selected sessions in one booking.')
+    +P('You don\'t need to book all your available sessions today. Any remaining sessions can be booked at a later date, and any unused sessions at the end of the summer period will automatically become makeup credits.')
+    +(staff? '' : P('Please remember that all booking changes and notifications of non-attendance must be made <b>by 4pm the day prior to your scheduled session.</b>'));
   if(f.error) html+='<div class="banner danger">'+f.error+'</div>';
   // Same time every week, in one go.
   const fillStarts=termBreakPossibleStarts(tb, f.duration);
