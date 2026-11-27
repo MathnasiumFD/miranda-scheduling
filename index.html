@@ -3622,6 +3622,33 @@ function resolveStandingLocation(studentId, weekday, dateKey, date, start, durat
 // real foreign key, so whichever request reaches Postgres first can make the other fail (Sept 2026,
 // root cause of "when adding a student i'm getting an error code" / "...may not have saved").
 // Deferring lets the caller insert them only once the student row is confirmed to exist.
+// Public holiday on a child's routine term-time day (Nov 2026, per Allie: "if your routine day falls
+// on a public holiday, you will automatically be awarded a makeup credit" — and "yes fix it" for term
+// time). A closed day that was added AFTER the session was booked already cancels it with a credit
+// (cancelSessionsOnClosedDate); this covers the other case, a closed day added ahead of time, which
+// the weekly booking used to just skip. Same credit as a closure cancellation: source 'closure',
+// valid 3 months from the holiday, noted with the holiday's name. Front desk only (parents can't
+// write credits), once per child/date/time — the id is worked out from those, so it never repeats.
+// Summer days are handled by the summer booking itself (issueSummerHolidayCredit).
+function awardRoutineHolidayCredit(student, date, weekday){
+  if(!actingAsFrontDesk() || student.heldUntil) return;
+  if(termBreakOn(date) || isStudentOnHold(student.id, date)) return;
+  const dateKey=toKey(date);
+  if(sessionsOnDate(dateKey).some(function(s){ return s.studentId===student.id; })) return; // already booked then cancelled by the closure — credited there
+  const plan=studentPlanOn(student.id, date);
+  (plan.recurring||[]).filter(function(r){ return r.weekday===weekday; }).forEach(function(slot){
+    const id=stableUuid('routine-holiday|'+student.id+'|'+dateKey+'|'+slot.start);
+    if(credits.some(function(c){ return c.id===id; })) return;
+    const closure=closedDayFor(date);
+    const issued=new Date(dateKey), expiry=addMonths(issued,3);
+    const c={id:id, studentId:student.id, issuedDate:issued, expiryDate:expiry, status:'available', redeemedSessionId:null, warningSent:false, source:'closure', note:(closure&&closure.label)? closure.label : 'Public holiday', minutes:student.duration||null, minutesUsed:0};
+    credits.push(c);
+    dbWrite('adding a public-holiday make-up credit', function(){ return supabaseClient.from('credits').upsert({
+      id:c.id, student_id:c.studentId, issued_date:dateKey, expiry_date:toKey(c.expiryDate),
+      status:c.status, redeemed_session_id:null, warning_sent:false, source:c.source, note:c.note, minutes:c.minutes
+    }, {onConflict:'id', ignoreDuplicates:true}); });
+  });
+}
 function generateRecurringSessions(student, weeksAhead, deferredSessions){
   // A held spot (Oct 2026) has no real sessions until it's confirmed — it only counts toward
   // permanent availability (see ratioDay's includeHeld).
@@ -3642,7 +3669,7 @@ function generateRecurringSessions(student, weeksAhead, deferredSessions){
       // than its own UTC-midnight parse, silently skipping the start date's own occurrence (and
       // starting a week late for a weekly recurring slot). toKey() on both sides avoids that entirely.
       if(student.startDate && toKey(date) < toKey(student.startDate)) return; // not enrolled yet — nothing to book before their first day (Sept 2026, per Allie: "its not always straight away")
-      if(isClosedDate(date)) return; // centre's closed this day — never pre-book a regular session onto it
+      if(isClosedDate(date)){ awardRoutineHolidayCredit(student, date, weekday); return; } // centre's closed this day — never pre-book a regular session onto it; their routine day earns a make-up credit instead (Nov 2026)
       if(termBreakOn(date)) return; // running summer hours this day — no standing afternoon session; families self-book a morning slot instead
       const dateKey=toKey(date);
       if(isStudentOnHold(student.id, date)) return; // on hold — leave this occurrence unbooked
@@ -10648,7 +10675,7 @@ function creditSourceLabel(c){
   return c.source==='manual'? 'Manual'+(c.note? ' <span class="small muted">— '+escapeHtml(c.note)+'</span>' : '')
     : c.source==='excused-absence'? 'Excused absence'
     : c.source==='parent-cancel'? 'Parent cancel'
-    : c.source==='closure'? 'Centre closure'
+    : c.source==='closure'? 'Centre closure'+(c.note? ' <span class="small muted">— '+escapeHtml(c.note)+'</span>' : '') // holiday name (Nov 2026)
     : 'No-show';
 }
 // Does this credit's child (or one of the child's parents) match the search box?
