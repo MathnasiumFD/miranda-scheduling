@@ -282,7 +282,7 @@
      page") — plain centring pushed the top of a pop-up taller than the screen (e.g. Add student)
      above the scrollable area, out of reach. Auto margins still centre short pop-ups, but a tall one
      now starts at the top and scrolls normally. */
-  .overlay{ position:fixed; inset:0; background:rgba(10,12,16,.45); display:flex; align-items:flex-start; justify-content:center; padding:16px; z-index:50; overflow-y:auto; }
+  .overlay{ position:fixed; inset:0; background:rgba(10,12,16,.45); display:flex; align-items:flex-start; justify-content:center; padding:16px; z-index:55; overflow-y:auto; } /* above the sticky parent banner (z 50), below toasts (z 60) — Nov 2026 */
   .modal{ background:var(--surface); border-radius:var(--radius); box-shadow:var(--shadow); max-width:460px; width:100%; padding:18px 20px; border:1px solid var(--border); margin:auto; }
   .row2{ display:flex; gap:10px; }
   .row2 > div{ flex:1; }
@@ -1946,6 +1946,7 @@ var state={
   summerAttendForm:null, // front desk: one student's summer days (Nov 2026)
   summerAttendFilter:{q:'', show:'all'},
   summerShiftWeek:0, summerShiftForm:null, // summer shift times (Nov 2026)
+  termBreakPlanForm:null, // book many summer sessions at once (Nov 2026)
   quickMoveForm:null,
   parentBookingCreditId:null,
   newStudentForm:null,
@@ -8561,7 +8562,8 @@ function renderSummerAttendModal(){
   if(skip) html+='<div class="banner warn">'+skip+' — they don\'t need summer days, but you can still book them.</div>';
   html+='<div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">'
     +'<button class="btn sm primary" onclick="openTermBreakRecurringForm(\''+student.id+'\')">+ Add a weekly time</button>'
-    +'<button class="btn sm" onclick="openTermBreakBookingForm(\''+student.id+'\')">+ Book a single day</button>'
+    +'<button class="btn sm" onclick="openTermBreakPlanForm(\''+student.id+'\')">+ Book several days</button>'
+    +'<button class="btn sm ghost" onclick="openTermBreakBookingForm(\''+student.id+'\')">+ Book a single day</button>'
   +'</div>';
   html+='<div class="section-label">Weekly summer times</div>';
   html+=picks.length? '<div class="session-list">'+picks.map(function(p){
@@ -8739,6 +8741,7 @@ function renderStaff(){
     html+=renderSummerAttendModal();
     html+=renderTermBreakRecurringModal();
     html+=renderTermBreakBookingModal();
+    html+=renderTermBreakPlanModal();
   }
 
   // Modals always render regardless of which tab is active — every one of these is only ever
@@ -11882,7 +11885,7 @@ function renderParent(){
   if(!parent) return '<div class="card"><p class="small muted">Your login isn\'t linked to a parent record — ask front desk to check your account.</p></div>';
   const tab=PARENT_TABS.some(function(t){ return t.id===state.parentTab; })? state.parentTab : 'home';
   let html=parentAnnouncementsHtml(parent)+renderParentTabsBar(tab);
-  if(tab==='summer'){ html+=renderParentSummerTab(parent); html+=renderTermBreakBookingModal(); html+=renderTermBreakRecurringModal(); return html; }
+  if(tab==='summer'){ html+=renderParentSummerTab(parent); html+=renderTermBreakBookingModal(); html+=renderTermBreakRecurringModal(); html+=renderTermBreakPlanModal(); return html; }
 
   html+='<div class="card"><div class="card-head"><h2>Welcome, '+parent.name+'</h2><button class="btn sm ghost" onclick="'+(supabaseClient?'logOut()':'parentLogout()')+'">Log out</button></div>'
     +'<p>This is your MATHQ hub for your child’s sessions — see what’s upcoming, request a permanent day/time change, cancel a session, or book a make-up using our live availability calendar.</p>'
@@ -12051,10 +12054,18 @@ function renderParentSummerTab(parent){
     return '<div class="card"><h2>Summer Schedule</h2><p class="small muted">Coming soon — check back here once we open summer/term break bookings.</p></div>';
   }
   const tb=activeOrUpcomingTermBreak;
+  // Wording per Allie (Nov 2026). Dates and hours come from the summer period itself.
+  const longDate=function(d){ return d.toLocaleDateString('en-AU',{weekday:'long', day:'numeric', month:'long'}).replace(',', ''); };
   let html='<div class="card"><h2>Summer Schedule</h2>'
-    +'<p>'+tb.label+', '+fmtShort(tb.startDate)+'–'+fmtShort(tb.endDate)+' — the centre runs '+minToLabel(tb.morningStart)+'–'+minToLabel(tb.morningEnd)+' during this period, in place of the usual regular schedule.</p>'
-    +'<p>Set up one recurring weekly time (it books every matching week at once) and/or book individual sessions one at a time — whichever suits you, both use the same summer session tally below.</p>'
-    +'<p><b>'+SUMMER_CUTOFF_NOTE+'</b> After that, please contact the centre.</p></div>'; // Nov 2026
+    +'<p>From '+longDate(tb.startDate)+' to '+longDate(tb.endDate)+' (inclusive), our centre will operate from '+minToLabel(tb.morningStart)+'–'+minToLabel(tb.morningEnd)+' in place of our regular opening hours.</p>'
+    +'<p>To accommodate your family\'s holiday plans, we offer two flexible booking options:</p>'
+    +'<ul style="margin:0 0 12px 18px;padding:0">'
+      +'<li><b>Book a single session:</b> Ideal for families whose availability varies from week to week. Select individual dates and times to fit around holidays, family commitments, playdates and other activities.</li>'
+      +'<li><b>Add a recurring time:</b> Ideal for families who prefer a consistent weekly routine. Select your preferred day and time to automatically schedule the same session each week throughout the summer period.</li>'
+    +'</ul>'
+    +'<h3 style="margin:14px 0 6px">Changes, Absences &amp; Makeup Sessions</h3>'
+    +'<p>We understand that plans can change, especially during the school holidays! You are welcome to amend your booked sessions as needed. However, all booking changes, notifications of non-attendance and makeup session requests must be made by <b>4pm the day prior</b> to your scheduled session.</p>'
+    +'<p>Your child\'s total summer session allowance, remaining available sessions and upcoming bookings are displayed below.</p></div>';
 
   parent.studentIds.forEach(function(sid){
     const student=findStudent(sid);
@@ -12073,7 +12084,7 @@ function renderParentSummerTab(parent){
       +'<div><div class="small muted">Used so far</div><b>'+used+' of '+total+'</b></div>'
       +'<div style="margin-left:auto;display:flex;gap:8px">'
         +(!parentCanManage(sid)? '<span class="small muted">View only — contact the centre to book</span>'
-        : '<button class="btn sm'+(remaining<=0?' ghost':' primary')+'" '+(remaining<=0?'disabled':'')+' onclick="openTermBreakBookingForm(\''+sid+'\')">Book a single session</button>'
+        : '<button class="btn sm'+(remaining<=0?' ghost':' primary')+'" '+(remaining<=0?'disabled':'')+' onclick="openTermBreakPlanForm(\''+sid+'\')">Book a single session</button>' // opens the planner: one day or many at once (Nov 2026)
         +'<button class="btn sm ghost" '+((remaining<=0||atRecurringCap)?'disabled':'')+' onclick="openTermBreakRecurringForm(\''+sid+'\')">+ Add a recurring time</button>')
       +'</div></div>';
     if(remaining<=0){ html+='<p class="small muted">No summer session credits left for '+student.name+' this period.</p>'; }
@@ -12249,6 +12260,143 @@ function renderCancelRequestModal(){
 // inside the break's own range, not closed), then only shows times that are genuinely open right
 // now, using the exact same termBreakOpenSeatsAt()/termBreakPickBestPod() math the confirm step
 // itself relies on — so nothing offered here can ever fail to book once picked.
+// Book many summer sessions at once (Nov 2026, per Allie: "when the parents go to book the summer
+// sessions, can they book them all at once as opposed to one at a time? ... allowed to only submit
+// partial sessions. they dont all have to be booked for it to go through, the unbooked ones will
+// remain as credits"). Every open summer weekday is listed week by week with a time picker; the
+// parent picks a time on as many days as they like (up to what's left in their summer allowance)
+// and books them together. Days left blank stay in the allowance to book later. "Same time every
+// week" fills a weekday's dates in one go. Follows the 4pm-day-before cutoff; front desk isn't held
+// to the allowance or the cutoff.
+function openTermBreakPlanForm(studentId){
+  const staff=actingAsFrontDesk();
+  const tb=summerBreakForBooking(staff);
+  if(!tb){ toast('No summer hours period is available to book right now.'); render(); return; }
+  const student=findStudent(studentId);
+  if(!staff && studentTermBreakRemaining(tb, studentId)<=0){ toast('No summer session credits left for '+student.name+' this period.'); render(); return; }
+  state.termBreakPlanForm={studentId:studentId, termBreakId:tb.id, duration:student.duration, picks:{}, fillWeekday:'Mon', fillStart:'', error:''};
+  render();
+}
+function closeTermBreakPlanForm(){ state.termBreakPlanForm=null; render(); }
+// The dates a family can still pick in this period: open weekdays from the first changeable date on,
+// skipping closed days and days this child already has a summer session.
+function termBreakPlanDates(tb, studentId){
+  const first=firstSummerChangeDateKey(), out=[];
+  for(let d=new Date(toKey(tb.startDate)); toKey(d)<=toKey(tb.endDate); d=addDays(d,1)){
+    const dk=toKey(d), wd=WEEKDAY_KEYS[(d.getDay()+6)%7];
+    if(!wd || dk<first || isClosedDate(d)) continue;
+    const booked=sessions.some(function(s){ return s.studentId===studentId && s.termBreak && s.status==='scheduled' && toKey(s.date)===dk; });
+    out.push({date:new Date(d), dateKey:dk, weekday:wd, booked:booked});
+  }
+  return out;
+}
+function termBreakPlanOpenStarts(tb, weekday, dateKey, duration){
+  return termBreakPossibleStarts(tb, duration).filter(function(st){ return termBreakOpenSeatsAt(tb, weekday, dateKey, st, duration).seats>0; });
+}
+function setTermBreakPlanPick(dateKey, value){
+  const f=state.termBreakPlanForm; if(!f) return;
+  if(value==='') delete f.picks[dateKey]; else f.picks[dateKey]=Number(value);
+  f.error='';
+  render();
+}
+function setTermBreakPlanField(field, value){ const f=state.termBreakPlanForm; if(!f) return; f[field]=value; f.error=''; render(); }
+function fillTermBreakPlanWeekday(){
+  const f=state.termBreakPlanForm; if(!f) return;
+  const tb=termBreaks.find(function(t){ return t.id===f.termBreakId; }); if(!tb) return;
+  if(f.fillStart===''){ f.error='Choose a time to fill in.'; render(); return; }
+  const st=Number(f.fillStart);
+  let filled=0, full=0;
+  termBreakPlanDates(tb, f.studentId).forEach(function(d){
+    if(d.booked || d.weekday!==f.fillWeekday) return;
+    if(termBreakPlanOpenStarts(tb, d.weekday, d.dateKey, f.duration).indexOf(st)>=0){ f.picks[d.dateKey]=st; filled++; } else full++;
+  });
+  f.error='';
+  toast(filled? 'Filled '+filled+' '+f.fillWeekday+(filled===1?'':'s')+' at '+minToLabel(st)+'.'+(full? ' '+full+' already full at that time.' : '') : 'That time isn\'t open on any '+f.fillWeekday+'.');
+  render();
+}
+function confirmTermBreakPlan(){
+  const f=state.termBreakPlanForm; if(!f) return;
+  const tb=termBreaks.find(function(t){ return t.id===f.termBreakId; });
+  if(!tb){ f.error='This summer hours period no longer exists.'; render(); return; }
+  const staff=actingAsFrontDesk();
+  if(!staff && !tb.visibleToParents){ f.error='This summer hours period isn\'t available for booking right now.'; render(); return; }
+  const keys=Object.keys(f.picks).sort();
+  if(!keys.length){ f.error='Choose a time on at least one day.'; render(); return; }
+  let remaining=staff? Infinity : studentTermBreakRemaining(tb, f.studentId);
+  if(keys.length>remaining){ f.error='You\'ve picked '+keys.length+' days but only have '+remaining+' summer session'+(remaining===1?'':'s')+' left. Untick '+(keys.length-remaining)+' to continue.'; render(); return; }
+  const student=findStudent(f.studentId);
+  const booked=[], missed=[];
+  keys.forEach(function(dk){
+    const date=new Date(dk), wd=WEEKDAY_KEYS[(date.getDay()+6)%7], st=f.picks[dk];
+    if(!summerChangeOpen(dk) || isClosedDate(date)){ missed.push(dk); return; }
+    const pick=termBreakPickBestPod(tb, wd, dk, st, f.duration);
+    if(!pick){ missed.push(dk); return; }
+    const sess={id:newId()||('sess'+(nextSessionId++)), studentId:student.id, podId:pick.podId, online:false, instructorId:pick.instructorId, instructorId2:null, handoff:null, date:date, start:st, duration:f.duration, status:'scheduled', bookedBy:staff?'staff':'parent', creditId:null, recurring:false, termBreak:true};
+    sessions.push(sess);
+    dbWrite('booking summer-hours sessions', function(){ return supabaseClient.from('sessions').insert({
+      id:sess.id, student_id:sess.studentId, pod_id:sess.podId, online:false, instructor_id:sess.instructorId,
+      instructor_id_2:null, handoff_min:null, the_date:dk, start_min:st, duration:sess.duration,
+      status:sess.status, booked_by:sess.bookedBy, credit_id:null, is_recurring:false, term_break:true
+    }); });
+    booked.push(dk);
+  });
+  if(!booked.length){ f.error='Those times have just filled up — please pick again.'; missed.forEach(function(dk){ delete f.picks[dk]; }); render(); return; }
+  const left=staff? null : studentTermBreakRemaining(tb, f.studentId);
+  toast('Booked '+booked.length+' summer session'+(booked.length===1?'':'s')+' for '+student.name+'.'
+    +(missed.length? ' '+missed.length+' just filled up and weren\'t booked.' : '')
+    +(left? ' '+left+' left to book later.' : ''), 7000);
+  state.termBreakPlanForm=null;
+  render();
+}
+function renderTermBreakPlanModal(){
+  const f=state.termBreakPlanForm;
+  if(!f) return '';
+  const tb=termBreaks.find(function(t){ return t.id===f.termBreakId; }); if(!tb) return '';
+  const student=findStudent(f.studentId); if(!student) return '';
+  const staff=actingAsFrontDesk();
+  const remaining=studentTermBreakRemaining(tb, f.studentId);
+  const picked=Object.keys(f.picks).length;
+  const over=!staff && picked>remaining;
+  const dates=termBreakPlanDates(tb, f.studentId);
+  let html='<div class="overlay" onclick="if(event.target===this) closeTermBreakPlanForm()"><div class="modal" style="max-width:640px">';
+  html+='<h3>Book '+student.name+'\'s summer sessions</h3>';
+  html+='<p class="small">Pick a time on every day you\'d like to come, then book them all at once. You don\'t have to use them all now — any you don\'t book stay available to book later.'+(staff? '' : ' '+SUMMER_CUTOFF_NOTE)+'</p>';
+  if(f.error) html+='<div class="banner danger">'+f.error+'</div>';
+  // Same time every week, in one go.
+  const fillStarts=termBreakPossibleStarts(tb, f.duration);
+  html+='<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px"><div><label>Same time every</label><select onchange="setTermBreakPlanField(\'fillWeekday\',this.value)">'
+      +WEEKDAY_KEYS.map(function(wd){ return '<option'+(wd===f.fillWeekday?' selected':'')+'>'+wd+'</option>'; }).join('')+'</select></div>'
+    +'<div><label>at</label><select onchange="setTermBreakPlanField(\'fillStart\',this.value)"><option value="">Choose…</option>'
+      +fillStarts.map(function(st){ return '<option value="'+st+'"'+(String(st)===String(f.fillStart)?' selected':'')+'>'+minToLabel(st)+'</option>'; }).join('')+'</select></div>'
+    +'<button class="btn sm" onclick="fillTermBreakPlanWeekday()">Fill in</button></div>';
+  if(!dates.length){ html+='<div class="empty-note">No summer days left that can still be booked.</div>'; }
+  else{
+    html+='<div style="max-height:46vh;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:4px 10px">';
+    let lastWeek='';
+    dates.forEach(function(d){
+      const wk=toKey(getMonday(d.date));
+      if(wk!==lastWeek){ html+='<div class="section-label" style="margin-top:8px">Week of '+fmtShort(getMonday(d.date))+'</div>'; lastWeek=wk; }
+      const label=d.date.toLocaleDateString('en-AU',{weekday:'short', day:'numeric', month:'short'});
+      if(d.booked){ html+='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:3px 0;border-bottom:1px solid var(--border)"><div>'+label+'</div><span class="small muted">Already booked</span></div>'; return; }
+      const opens=termBreakPlanOpenStarts(tb, d.weekday, d.dateKey, f.duration);
+      const cur=f.picks[d.dateKey];
+      html+='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:3px 0;border-bottom:1px solid var(--border)"><div>'+(cur!=null? '<b>'+label+'</b>' : label)+'</div>'
+        +(opens.length? '<select style="width:auto;margin:0;padding:4px 8px" onchange="setTermBreakPlanPick(\''+d.dateKey+'\',this.value)"><option value="">Not this day</option>'
+            +opens.map(function(st){ return '<option value="'+st+'"'+(st===cur?' selected':'')+'>'+minToLabel(st)+'</option>'; }).join('')+'</select>'
+          : '<span class="small muted">Full</span>')
+      +'</div>';
+    });
+    html+='</div>';
+  }
+  html+='<div class="small" style="margin-top:10px'+(over?';color:var(--danger)':'')+'"><b>'+picked+'</b> day'+(picked===1?'':'s')+' picked'
+    +(staff? '' : ' · '+remaining+' summer session'+(remaining===1?'':'s')+' available'+(over? ' — untick '+(picked-remaining)+' to continue' : picked? ' · '+(remaining-picked)+' left to book later' : ''))+'</div>';
+  html+='<div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end">'
+    +'<button class="btn ghost" onclick="closeTermBreakPlanForm()">Cancel</button>'
+    +'<button class="btn primary" '+((!picked||over)?'disabled':'')+' onclick="confirmTermBreakPlan()">Book '+(picked||'')+' session'+(picked===1?'':'s')+'</button>'
+  +'</div>';
+  html+='</div></div>';
+  return html;
+}
 function renderTermBreakBookingModal(){
   const f=state.termBreakBookingForm;
   if(!f) return '';
